@@ -1,30 +1,8 @@
 const LocalStrategy = require('passport-local').Strategy;
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const JwtStrategy = require('passport-jwt').Strategy;
-const ExtractJwt = require('passport-jwt').ExtractJwt;
 const bcrypt = require('bcryptjs');
-const { JWT_SECRET, verifyToken } = require('./jwt');
 
 module.exports = (passport, prisma) => {
-  // JWT Strategy
-  const jwtOptions = {
-    jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
-    secretOrKey: JWT_SECRET,
-    passReqToCallback: true
-  };
-
-  passport.use(new JwtStrategy(jwtOptions, async (req, jwt_payload, done) => {
-    try {
-      const user = await verifyToken(req.headers.authorization.split(' ')[1]);
-      if (!user) {
-        return done(null, false);
-      }
-      return done(null, user);
-    } catch (error) {
-      return done(error, false);
-    }
-  }));
-
   // Local Strategy
   passport.use(
     new LocalStrategy(
@@ -37,7 +15,7 @@ module.exports = (passport, prisma) => {
           const user = await prisma.user.findUnique({
             where: { email },
             include: {
-              userrole: true,
+              roles: true,
               investor: true,
             },
           });
@@ -77,7 +55,7 @@ module.exports = (passport, prisma) => {
           let user = await prisma.user.findUnique({
             where: { email: profile.emails[0].value },
             include: {
-              userrole: true,
+              roles: true,
               investor: true,
             },
           });
@@ -115,7 +93,7 @@ module.exports = (passport, prisma) => {
               last_name: profile.name.familyName,
               email_verified: true,
               profile_image: profile.photos[0].value,
-              userrole: {
+              roles: {
                 create: {
                   role: 'INVESTOR',
                 },
@@ -135,7 +113,7 @@ module.exports = (passport, prisma) => {
               },
             },
             include: {
-              userrole: true,
+              roles: true,
               investor: true,
             },
           });
@@ -159,7 +137,7 @@ module.exports = (passport, prisma) => {
       const user = await prisma.user.findUnique({
         where: { id },
         include: {
-          userrole: true,
+          roles: true,
           investor: true,
         },
       });

@@ -4,8 +4,6 @@ const passport = require('passport');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
-const { generateToken } = require('../config/jwt');
-const crossmintService = require('../services/crossmint');
 
 // Admin Login
 router.post('/admin/login', async (req, res) => {
@@ -15,12 +13,12 @@ router.post('/admin/login', async (req, res) => {
     const user = await prisma.user.findUnique({
       where: { email },
       include: {
-        userrole: true,
+        roles: true,
         admin: true,
       },
     });
 
-    if (!user || !user.userrole.some(r => r.role === 'ADMIN')) {
+    if (!user || !user.roles.some(r => r.role === 'ADMIN')) {
       return res.status(401).json({ message: 'Unauthorized access' });
     }
 
@@ -29,14 +27,15 @@ router.post('/admin/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    const token = generateToken(user);
-    return res.json({
-      token,
-      user: {
+    req.login(user, (err) => {
+      if (err) {
+        return res.status(500).json({ message: 'Error logging in' });
+      }
+      return res.json({
         id: user.id,
         email: user.email,
-        roles: user.userrole.map(r => r.role),
-      }
+        roles: user.roles.map(r => r.role),
+      });
     });
   } catch (error) {
     console.error(error);
@@ -52,12 +51,12 @@ router.post('/issuer/login', async (req, res) => {
     const user = await prisma.user.findUnique({
       where: { email },
       include: {
-        userrole: true,
+        roles: true,
         issuer: true,
       },
     });
 
-    if (!user || !user.userrole.some(r => r.role === 'ISSUER')) {
+    if (!user || !user.roles.some(r => r.role === 'ISSUER')) {
       return res.status(401).json({ message: 'Unauthorized access' });
     }
 
@@ -66,14 +65,15 @@ router.post('/issuer/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    const token = generateToken(user);
-    return res.json({
-      token,
-      user: {
+    req.login(user, (err) => {
+      if (err) {
+        return res.status(500).json({ message: 'Error logging in' });
+      }
+      return res.json({
         id: user.id,
         email: user.email,
-        roles: user.userrole.map(r => r.role),
-      }
+        roles: user.roles.map(r => r.role),
+      });
     });
   } catch (error) {
     console.error(error);
@@ -89,12 +89,12 @@ router.post('/investor/login', async (req, res) => {
     const user = await prisma.user.findUnique({
       where: { email },
       include: {
-        userrole: true,
+        roles: true,
         investor: true,
       },
     });
 
-    if (!user || !user.userrole.some(r => r.role === 'INVESTOR')) {
+    if (!user || !user.roles.some(r => r.role === 'INVESTOR')) {
       return res.status(401).json({ message: 'Unauthorized access' });
     }
 
@@ -103,14 +103,15 @@ router.post('/investor/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    const token = generateToken(user);
-    return res.json({
-      token,
-      user: {
+    req.login(user, (err) => {
+      if (err) {
+        return res.status(500).json({ message: 'Error logging in' });
+      }
+      return res.json({
         id: user.id,
         email: user.email,
-        roles: user.userrole.map(r => r.role),
-      }
+        roles: user.roles.map(r => r.role),
+      });
     });
   } catch (error) {
     console.error(error);
@@ -134,60 +135,44 @@ router.post('/issuer/register', async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const password_hash = await bcrypt.hash(password, salt);
 
-    // Create user and issuer in a transaction
-    const result = await prisma.$transaction(async (prisma) => {
-      const user = await prisma.user.create({
-        data: {
-          email,
-          password_hash,
-          first_name,
-          last_name,
-          userrole: {
-            create: {
-              role: 'ISSUER',
-            },
-          },
-          issuer: {
-            create: {
-              company_name,
-              company_registration_number,
-              jurisdiction,
-              verification_status: false,
-            },
+    const user = await prisma.user.create({
+      data: {
+        email,
+        password_hash,
+        first_name,
+        last_name,
+        roles: {
+          create: {
+            role: 'ISSUER',
           },
         },
-        include: {
-          userrole: true,
-          issuer: true,
+        issuer: {
+          create: {
+            company_name,
+            company_registration_number,
+            jurisdiction,
+            verification_status: false,
+          },
         },
-      });
-
-      // Create Solana wallet for the issuer
-      const walletResponse = await crossmintService.createIssuerWallet(user.id);
-      
-      // Update issuer with wallet information
-      await prisma.issuer.update({
-        where: { user_id: user.id },
-        data: {
-          wallet_address: walletResponse.address,
-          wallet_created_at: new Date(),
-        },
-      });
-
-      return user;
+      },
+      include: {
+        roles: true,
+        issuer: true,
+      },
     });
 
-    const token = generateToken(result);
-    return res.json({
-      token,
-      user: {
-        id: result.id,
-        email: result.email,
-        roles: result.userrole.map(r => r.role),
+    req.login(user, (err) => {
+      if (err) {
+        return res.status(500).json({ message: 'Error logging in' });
       }
+      return res.json({
+        id: user.id,
+        email: user.email,
+        roles: user.roles.map(r => r.role),
+      });
     });
   } catch (error) {
-    console.error('Registration error:', error);
+    console.error(error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -214,7 +199,7 @@ router.post('/investor/register', async (req, res) => {
         password_hash,
         first_name,
         last_name,
-        userrole: {
+        roles: {
           create: {
             role: 'INVESTOR',
           },
@@ -229,19 +214,20 @@ router.post('/investor/register', async (req, res) => {
         },
       },
       include: {
-        userrole: true,
+        roles: true,
         investor: true,
       },
     });
 
-    const token = generateToken(user);
-    return res.json({
-      token,
-      user: {
+    req.login(user, (err) => {
+      if (err) {
+        return res.status(500).json({ message: 'Error logging in' });
+      }
+      return res.json({
         id: user.id,
         email: user.email,
-        roles: user.userrole.map(r => r.role),
-      }
+        roles: user.roles.map(r => r.role),
+      });
     });
   } catch (error) {
     console.error(error);
@@ -250,20 +236,28 @@ router.post('/investor/register', async (req, res) => {
 });
 
 // Check Authentication Status
-router.get('/check', passport.authenticate('jwt', { session: false }), (req, res) => {
-  return res.json({
-    authenticated: true,
-    user: {
-      id: req.user.id,
-      email: req.user.email,
-      roles: req.user.userrole.map(r => r.role),
-    }
-  });
+router.get('/check', (req, res) => {
+  if (req.isAuthenticated()) {
+    return res.json({
+      authenticated: true,
+      user: {
+        id: req.user.id,
+        email: req.user.email,
+      },
+      roles: req.user.roles.map(r => r.role),
+    });
+  }
+  res.json({ authenticated: false });
 });
 
-// Get current user
-router.get('/me', passport.authenticate('jwt', { session: false }), (req, res) => {
-  res.json(req.user);
+// Logout
+router.post('/logout', (req, res) => {
+  req.logout((err) => {
+    if (err) {
+      return res.status(500).json({ message: 'Error logging out' });
+    }
+    res.json({ message: 'Logged out successfully' });
+  });
 });
 
 // Google OAuth routes
@@ -276,9 +270,16 @@ router.get(
   '/google/callback',
   passport.authenticate('google', { failureRedirect: '/login' }),
   (req, res) => {
-    const token = generateToken(req.user);
-    res.redirect(`${process.env.CLIENT_URL}/auth/callback?token=${token}`);
+    res.redirect(process.env.CLIENT_URL);
   }
 );
+
+// Get current user
+router.get('/me', (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Not authenticated' });
+  }
+  res.json(req.user);
+});
 
 module.exports = router; 

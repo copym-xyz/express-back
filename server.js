@@ -63,8 +63,9 @@ passport.deserializeUser(async (id, done) => {
 // Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/issuer', require('./routes/issuer'));
-app.use('/api/investor', require('./routes/investor'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/investor', require('./routes/investor'));
+app.use('/api/wallet', require('./routes/wallet'));
 
 // Home route
 app.get('/', (req, res) => {
