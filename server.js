@@ -5,6 +5,7 @@ const cookieParser = require('cookie-parser');
 const session = require('express-session');
 const passport = require('passport');
 const { PrismaClient } = require('@prisma/client');
+const jwt = require('jsonwebtoken');
 
 // Initialize Express app
 const app = express();
@@ -43,21 +44,36 @@ app.use(passport.session());
 // Passport config
 require('./config/passport')(passport, prisma);
 
-// Passport serialization
-passport.serializeUser((user, done) => {
-  done(null, user.id);
-});
-
-passport.deserializeUser(async (id, done) => {
-  try {
-    const user = await prisma.user.findUnique({
-      where: { id },
-      include: { roles: true }
-    });
-    done(null, user);
-  } catch (err) {
-    done(err);
+// JWT Authentication middleware
+app.use(async (req, res, next) => {
+  // Check for JWT token in Authorization header
+  const authHeader = req.headers.authorization;
+  
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
+    
+    try {
+      // Verify the token
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+      
+      // If token is valid, fetch the user from the database
+      const user = await prisma.user.findUnique({
+        where: { id: decoded.userId },
+        include: { roles: true }
+      });
+      
+      if (user) {
+        // Attach the user to the request object
+        req.user = user;
+        req.isAuthenticated = () => true;
+      }
+    } catch (error) {
+      console.error('JWT Verification failed:', error);
+      // Don't return an error, just proceed without authentication
+    }
   }
+  
+  next();
 });
 
 // Routes

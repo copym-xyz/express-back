@@ -17,6 +17,52 @@ const isIssuer = (req, res, next) => {
   next();
 };
 
+// Get issuer profile data
+router.get('/profile', isIssuer, async (req, res) => {
+  try {
+    console.log('Fetching profile for issuer:', req.user.id);
+    
+    const issuerProfile = await prisma.issuer.findUnique({
+      where: {
+        user_id: req.user.id
+      },
+      include: {
+        user: {
+          select: {
+            email: true,
+            first_name: true,
+            last_name: true,
+          }
+        }
+      }
+    });
+
+    if (!issuerProfile) {
+      return res.status(404).json({ message: 'Issuer profile not found' });
+    }
+
+    // Format the response data
+    const profileData = {
+      email: issuerProfile.user.email,
+      first_name: issuerProfile.user.first_name,
+      last_name: issuerProfile.user.last_name,
+      profile: {
+        company_name: issuerProfile.company_name,
+        company_registration_number: issuerProfile.company_registration_number,
+        registration_number: issuerProfile.company_registration_number, // For compatibility
+        jurisdiction: issuerProfile.jurisdiction,
+        verification_status: issuerProfile.verification_status,
+        address: issuerProfile.address || 'Not provided'
+      }
+    };
+
+    res.json(profileData);
+  } catch (error) {
+    console.error('Error fetching issuer profile:', error);
+    res.status(500).json({ message: 'Failed to fetch issuer profile' });
+  }
+});
+
 // Get issuer dashboard data
 router.get('/dashboard', isIssuer, async (req, res) => {
   try {
