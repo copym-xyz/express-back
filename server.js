@@ -14,7 +14,9 @@ const prisma = new PrismaClient();
 // CORS configuration
 app.use(cors({
   origin: 'http://localhost:3000',
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
 // Middleware
@@ -82,6 +84,26 @@ app.use('/api/issuer', require('./routes/issuer'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/investor', require('./routes/investor'));
 app.use('/api/wallet', require('./routes/wallet'));
+app.use('/api/sumsub', require('./routes/sumsub'));
+
+// Test endpoint that always works
+app.get('/api/test', (req, res) => {
+  console.log('Test endpoint hit');
+  res.json({ message: 'Backend server is running!' });
+});
+
+app.post('/api/test-token', (req, res) => {
+  console.log('Test token endpoint hit');
+  res.json({ token: 'test-token-123', success: true });
+});
+
+// Print out all registered routes
+console.log('Registered routes:');
+app._router.stack.forEach(function(r){
+  if (r.route && r.route.path){
+    console.log(r.route.method ? r.route.method + ' ' : 'ALL ', r.route.path);
+  }
+});
 
 // Home route
 app.get('/', (req, res) => {
