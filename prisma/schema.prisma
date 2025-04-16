@@ -27,6 +27,9 @@ model User {
   issuer         Issuer?
   investor       Investor?
   wallet         Wallet?
+  
+  // Add relation to KYC verifications
+  kyc_verifications kycVerification[]
 }
 
 model UserRole {
@@ -56,6 +59,15 @@ model Issuer {
   verification_date       DateTime?
   company_documents       Json?
   user                    User     @relation(fields: [user_id], references: [id])
+  sumsub_applicant_id     String?
+  sumsub_external_id      String?
+  sumsub_correlation_id   String?
+  sumsub_inspection_id    String?
+  is_active               Boolean  @default(true)
+  is_kyb_completed        Boolean  @default(false)
+  mobile_number           String?
+  platform_client_id      String?
+  registration_date       DateTime @default(now())
 }
 
 model Investor {
@@ -114,4 +126,33 @@ model Wallet {
   created_at   DateTime @default(now())
   updated_at   DateTime @updatedAt
   user         User     @relation(fields: [user_id], references: [id])
+}
+
+model kycVerification {
+  id               Int       @id @default(autoincrement())
+  applicantId      String
+  externalUserId   String
+  inspectionId     String
+  correlationId    String?
+  type             String
+  reviewStatus     String
+  reviewResult     String?
+  createdAt        DateTime  @default(now())
+  modifiedAt       DateTime  @updatedAt
+  rawData          String    @db.Text
+  userId           Int?
+  user             User?     @relation(fields: [userId], references: [id])
+  
+  // New fields for webhook handling
+  signatureValid   Boolean   @default(false)
+  webhookType      String?
+  eventTimestamp   DateTime?
+  processingStatus String?   @default("processed")
+  retryCount       Int       @default(0)
+  errorMessage     String?
+
+  @@index([externalUserId])
+  @@index([webhookType])
+  @@index([applicantId])
+  @@map("kyc_verifications")
 } 
