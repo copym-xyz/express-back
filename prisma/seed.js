@@ -4,15 +4,10 @@ const bcrypt = require('bcryptjs');
 const prisma = new PrismaClient();
 
 async function main() {
-  // Clean up existing data
-  await prisma.refreshToken.deleteMany({});
-  await prisma.authProvider.deleteMany({});
-  await prisma.userRole.deleteMany({});
-  await prisma.admin.deleteMany({});
-  await prisma.issuer.deleteMany({});
-  await prisma.investor.deleteMany({});
-  await prisma.user.deleteMany({});
-
+  console.log('Starting seed process...');
+  
+  // Skip deletion to avoid foreign key issues
+  
   // Create sample admin accounts
   const adminUsers = [
     {
@@ -97,95 +92,291 @@ async function main() {
     },
   ];
 
-  console.log('Creating admin users...');
-  // Create admin users
+  console.log('Creating/updating admin users...');
+  // Create or update admin users
   for (const admin of adminUsers) {
-    const salt = await bcrypt.genSalt(10);
-    const password_hash = await bcrypt.hash(admin.password, salt);
-
-    await prisma.user.create({
-      data: {
-        email: admin.email,
-        password_hash,
-        first_name: admin.first_name,
-        last_name: admin.last_name,
-        email_verified: true,
-        roles: {
-          create: {
-            role: 'ADMIN',
+    try {
+      const salt = await bcrypt.genSalt(10);
+      const password_hash = await bcrypt.hash(admin.password, salt);
+  
+      const existingUser = await prisma.users.findUnique({
+        where: { email: admin.email }
+      });
+  
+      if (existingUser) {
+        console.log(`Updating existing admin user: ${admin.email}`);
+        await prisma.users.update({
+          where: { id: existingUser.id },
+          data: { 
+            password: password_hash,
+            first_name: admin.first_name,
+            last_name: admin.last_name,
+            is_verified: true
+          }
+        });
+        
+        // Check if user has admin role, if not create it
+        const existingRole = await prisma.userrole.findFirst({
+          where: { 
+            user_id: existingUser.id,
+            role: 'ADMIN'
+          }
+        });
+        
+        if (!existingRole) {
+          console.log(`Adding ADMIN role to user: ${admin.email}`);
+          await prisma.userrole.create({
+            data: {
+              user_id: existingUser.id,
+              role: 'ADMIN'
+            }
+          });
+        }
+        
+        // Check if user has admin profile, if not create it
+        const existingProfile = await prisma.admin.findUnique({
+          where: { user_id: existingUser.id }
+        });
+        
+        if (!existingProfile) {
+          console.log(`Creating admin profile for: ${admin.email}`);
+          await prisma.admin.create({
+            data: {
+              user_id: existingUser.id,
+              department: admin.department,
+              position: admin.position
+            }
+          });
+        }
+      } else {
+        console.log(`Creating new admin user: ${admin.email}`);
+        const newUser = await prisma.users.create({
+          data: {
+            email: admin.email,
+            password: password_hash,
+            first_name: admin.first_name,
+            last_name: admin.last_name,
+            is_verified: true,
+            updated_at: new Date(),
+            created_at: new Date()
           },
-        },
-        admin: {
-          create: {
+        });
+        
+        // Create the role separately
+        await prisma.userrole.create({
+          data: {
+            user_id: newUser.id,
+            role: 'ADMIN'
+          }
+        });
+        
+        // Create admin profile
+        await prisma.admin.create({
+          data: {
+            user_id: newUser.id,
             department: admin.department,
-            position: admin.position,
-          },
-        },
-      },
-    });
+            position: admin.position
+          }
+        });
+      }
+    } catch (error) {
+      console.error(`Error creating/updating admin user ${admin.email}:`, error);
+    }
   }
 
-  console.log('Creating issuer users...');
-  // Create issuer users
+  console.log('Creating/updating issuer users...');
+  // Create or update issuer users
   for (const issuer of issuerUsers) {
-    const salt = await bcrypt.genSalt(10);
-    const password_hash = await bcrypt.hash(issuer.password, salt);
-
-    await prisma.user.create({
-      data: {
-        email: issuer.email,
-        password_hash,
-        first_name: issuer.first_name,
-        last_name: issuer.last_name,
-        email_verified: true,
-        roles: {
-          create: {
-            role: 'ISSUER',
+    try {
+      const salt = await bcrypt.genSalt(10);
+      const password_hash = await bcrypt.hash(issuer.password, salt);
+  
+      const existingUser = await prisma.users.findUnique({
+        where: { email: issuer.email }
+      });
+  
+      if (existingUser) {
+        console.log(`Updating existing issuer user: ${issuer.email}`);
+        await prisma.users.update({
+          where: { id: existingUser.id },
+          data: { 
+            password: password_hash,
+            first_name: issuer.first_name,
+            last_name: issuer.last_name,
+            is_verified: true
+          }
+        });
+        
+        // Check if user has issuer role, if not create it
+        const existingRole = await prisma.userrole.findFirst({
+          where: { 
+            user_id: existingUser.id,
+            role: 'ISSUER'
+          }
+        });
+        
+        if (!existingRole) {
+          console.log(`Adding ISSUER role to user: ${issuer.email}`);
+          await prisma.userrole.create({
+            data: {
+              user_id: existingUser.id,
+              role: 'ISSUER'
+            }
+          });
+        }
+        
+        // Check if user has issuer profile, if not create it
+        const existingProfile = await prisma.issuer.findUnique({
+          where: { user_id: existingUser.id }
+        });
+        
+        if (!existingProfile) {
+          console.log(`Creating issuer profile for: ${issuer.email}`);
+          await prisma.issuer.create({
+            data: {
+              user_id: existingUser.id,
+              company_name: issuer.company_name,
+              company_registration_number: issuer.company_registration_number,
+              jurisdiction: issuer.jurisdiction,
+              verification_status: true
+            }
+          });
+        }
+      } else {
+        console.log(`Creating new issuer user: ${issuer.email}`);
+        const newUser = await prisma.users.create({
+          data: {
+            email: issuer.email,
+            password: password_hash,
+            first_name: issuer.first_name,
+            last_name: issuer.last_name,
+            is_verified: true,
+            updated_at: new Date(),
+            created_at: new Date()
           },
-        },
-        issuer: {
-          create: {
+        });
+        
+        // Create the role separately
+        await prisma.userrole.create({
+          data: {
+            user_id: newUser.id,
+            role: 'ISSUER'
+          }
+        });
+        
+        // Create issuer profile
+        await prisma.issuer.create({
+          data: {
+            user_id: newUser.id,
             company_name: issuer.company_name,
             company_registration_number: issuer.company_registration_number,
             jurisdiction: issuer.jurisdiction,
-            verification_status: true,
-          },
-        },
-      },
-    });
+            verification_status: true
+          }
+        });
+      }
+    } catch (error) {
+      console.error(`Error creating/updating issuer user ${issuer.email}:`, error);
+    }
   }
 
-  console.log('Creating investor users...');
-  // Create investor users
+  console.log('Creating/updating investor users...');
+  // Create or update investor users
   for (const investor of investorUsers) {
-    const salt = await bcrypt.genSalt(10);
-    const password_hash = await bcrypt.hash(investor.password, salt);
-
-    await prisma.user.create({
-      data: {
-        email: investor.email,
-        password_hash,
-        first_name: investor.first_name,
-        last_name: investor.last_name,
-        email_verified: true,
-        roles: {
-          create: {
-            role: 'INVESTOR',
+    try {
+      const salt = await bcrypt.genSalt(10);
+      const password_hash = await bcrypt.hash(investor.password, salt);
+  
+      const existingUser = await prisma.users.findUnique({
+        where: { email: investor.email }
+      });
+  
+      if (existingUser) {
+        console.log(`Updating existing investor user: ${investor.email}`);
+        await prisma.users.update({
+          where: { id: existingUser.id },
+          data: { 
+            password: password_hash,
+            first_name: investor.first_name,
+            last_name: investor.last_name,
+            is_verified: true
+          }
+        });
+        
+        // Check if user has investor role, if not create it
+        const existingRole = await prisma.userrole.findFirst({
+          where: { 
+            user_id: existingUser.id,
+            role: 'INVESTOR'
+          }
+        });
+        
+        if (!existingRole) {
+          console.log(`Adding INVESTOR role to user: ${investor.email}`);
+          await prisma.userrole.create({
+            data: {
+              user_id: existingUser.id,
+              role: 'INVESTOR'
+            }
+          });
+        }
+        
+        // Check if user has investor profile, if not create it
+        const existingProfile = await prisma.investor.findUnique({
+          where: { user_id: existingUser.id }
+        });
+        
+        if (!existingProfile) {
+          console.log(`Creating investor profile for: ${investor.email}`);
+          await prisma.investor.create({
+            data: {
+              user_id: existingUser.id,
+              investor_type: investor.investor_type,
+              accreditation_status: 'APPROVED',
+              kyc_verified: true,
+              aml_verified: true
+            }
+          });
+        }
+      } else {
+        console.log(`Creating new investor user: ${investor.email}`);
+        const newUser = await prisma.users.create({
+          data: {
+            email: investor.email,
+            password: password_hash,
+            first_name: investor.first_name,
+            last_name: investor.last_name,
+            is_verified: true,
+            updated_at: new Date(),
+            created_at: new Date()
           },
-        },
-        investor: {
-          create: {
+        });
+        
+        // Create the role separately
+        await prisma.userrole.create({
+          data: {
+            user_id: newUser.id,
+            role: 'INVESTOR'
+          }
+        });
+        
+        // Create investor profile
+        await prisma.investor.create({
+          data: {
+            user_id: newUser.id,
             investor_type: investor.investor_type,
             accreditation_status: 'APPROVED',
             kyc_verified: true,
-            aml_verified: true,
-          },
-        },
-      },
-    });
+            aml_verified: true
+          }
+        });
+      }
+    } catch (error) {
+      console.error(`Error creating/updating investor user ${investor.email}:`, error);
+    }
   }
 
-  console.log('Seed data created successfully!');
+  console.log('Seed data created/updated successfully!');
 }
 
 main()

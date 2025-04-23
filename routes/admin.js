@@ -4,6 +4,9 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const axios = require('axios');
 const crypto = require('crypto');
+const { isAdmin } = require('../middleware/auth');
+const extractUserId = require('../utils/extractUserId');
+const { generateDIDForIssuer } = require('../utils/didUtils');
 
 // Crossmint API configuration
 const CROSSMINT_API_KEY = process.env.CROSSMINT_API_KEY || "sk_staging_666stoe1iL5FLscksmnoFJMDfD5FhivjjSfSJixawaVc81r9TRPoH6uaXiECY9P4zKsAv2HHpPcnsXHAhUrgSwBcjw6Hb1dpGLixfQTTJZZKttvaFU61dUThuCWhsahHLoKAXfeBa4XWHtjAQLzYgG4H62tSNyN2pweC8vMMvb5yPYrehZMgZUb5Skvbpe3z9RLfCXMjPDWoB8eZTZW6PW2P";
@@ -14,20 +17,6 @@ const SUMSUB_APP_TOKEN = process.env.SUMSUB_APP_TOKEN || 'sbx:tM8HVP9NTOKvJMGn0i
 const SUMSUB_SECRET_KEY = process.env.SUMSUB_SECRET_KEY || '535NduU5ydNWqHnFsplSuiq7wDPR3BnC';
 const SUMSUB_BASE_URL = 'https://api.sumsub.com';
 
-// Middleware to check if user is authenticated and is an admin
-const isAdmin = (req, res, next) => {
-  if (!req.isAuthenticated()) {
-    return res.status(401).json({ message: 'Unauthorized' });
-  }
-  
-  const isAdminRole = req.user.roles.some(role => role.role === 'ADMIN');
-  if (!isAdminRole) {
-    return res.status(403).json({ message: 'Forbidden - Admin access required' });
-  }
-  
-  next();
-};
-
 // Create signature for Sumsub API
 function createSignature(method, endpoint, ts, payload = '') {
   const data = ts + method + endpoint + payload;
@@ -37,12 +26,72 @@ function createSignature(method, endpoint, ts, payload = '') {
     .digest('hex');
 }
 
+// Helper function to make Sumsub API requests
+async function makeSumsubRequest(method, endpoint, body = null) {
+  const ts = Math.floor(Date.now() / 1000).toString();
+  
+  let payload = '';
+  if (body && Object.keys(body).length > 0) {
+    payload = JSON.stringify(body);
+  }
+  
+  const signature = createSignature(method, endpoint, ts, payload);
+  
+  const headers = {
+    'Accept': 'application/json',
+    'X-App-Token': SUMSUB_APP_TOKEN,
+    'X-App-Access-Sig': signature,
+    'X-App-Access-Ts': ts
+  };
+  
+  if (body) {
+    headers['Content-Type'] = 'application/json';
+  }
+  
+  try {
+    const response = await axios({
+      method,
+      url: `${SUMSUB_BASE_URL}${endpoint}`,
+      headers,
+      data: body || undefined
+    });
+    
+    return response.data;
+  } catch (error) {
+    console.error(`Sumsub API error (${method} ${endpoint}):`, error.message);
+    if (error.response) {
+      console.error('Error status:', error.response.status);
+      console.error('Error data:', error.response.data);
+    }
+    throw error;
+  }
+}
+
+// Get all Sumsub applicants for admin dashboard
+router.get('/sumsub/applicants', isAdmin, async (req, res) => {
+  try {
+    console.log('Fetching applicants from Sumsub...');
+    
+    // Use the Sumsub list applicants endpoint
+    const endpoint = '/resources/applicants?limit=50';
+    const applicantsData = await makeSumsubRequest('GET', endpoint);
+    
+    console.log(`Retrieved ${applicantsData.items?.length || 0} applicants from Sumsub`);
+    
+    // Return the applicants data
+    res.json(applicantsData);
+  } catch (error) {
+    console.error('Error fetching applicants from Sumsub:', error.message);
+    res.status(500).json({ message: 'Failed to fetch applicants from Sumsub' });
+  }
+});
+
 // Get all users for admin dashboard
 router.get('/users', isAdmin, async (req, res) => {
   try {
-    const users = await prisma.user.findMany({
+    const users = await prisma.users.findMany({
       include: {
-        roles: true,
+        userrole: true,
         admin: true,
         issuer: true,
         investor: true
@@ -57,11 +106,11 @@ router.get('/users', isAdmin, async (req, res) => {
       last_name: user.last_name,
       email_verified: user.email_verified,
       created_at: user.created_at,
-      roles: user.roles,
+      roles: user.userrole,
       // Add verification status based on role
-      verification_status: user.roles.some(role => role.role === 'ISSUER') && user.issuer 
+      verification_status: user.userrole.some(role => role.role === 'ISSUER') && user.issuer 
         ? (user.issuer.verification_status ? 'VERIFIED' : 'PENDING')
-        : (user.roles.some(role => role.role === 'INVESTOR') && user.investor 
+        : (user.userrole.some(role => role.role === 'INVESTOR') && user.investor 
           ? user.investor.accreditation_status
           : 'NA')
     }));
@@ -73,119 +122,110 @@ router.get('/users', isAdmin, async (req, res) => {
   }
 });
 
-// Get KYC verifications for admin dashboard
+// Get KYC verifications from local database
 router.get('/kyc-verifications', isAdmin, async (req, res) => {
   try {
     const { userId } = req.query;
-    let where = {};
     
-    // If userId is provided, filter by that user
+    // Build query conditions
+    const whereCondition = {};
+    
+    // If userId is provided, first get the issuer to find applicant ID
     if (userId) {
-      where.userId = parseInt(userId);
+      const issuer = await prisma.issuer.findFirst({
+        where: { user_id: parseInt(userId) }
+      });
+      
+      if (issuer && issuer.sumsub_applicant_id) {
+        whereCondition.applicant_id = issuer.sumsub_applicant_id;
+      } else {
+        // If no issuer found with this userId, return empty results
+        return res.json([]);
+      }
     }
     
-    // Get the verification records
+    // Get KYC verifications
     const verifications = await prisma.kycVerification.findMany({
-      where,
+      where: whereCondition,
       orderBy: {
-        createdAt: 'desc'
+        created_at: 'desc'
       },
       include: {
-        user: {
+        users: {
           select: {
             id: true,
             email: true,
             first_name: true,
-            last_name: true,
-            issuer: true
+            last_name: true
           }
         }
       }
     });
     
-    // Format the response
-    const formattedVerifications = verifications.map(verification => {
-      // Parse the raw JSON data
-      let rawData = {};
-      try {
-        rawData = JSON.parse(verification.rawData);
-      } catch (e) {
-        console.error('Error parsing verification raw data:', e);
-      }
-      
-      return {
-        id: verification.id,
-        applicantId: verification.applicantId,
-        externalUserId: verification.externalUserId,
-        inspectionId: verification.inspectionId,
-        correlationId: verification.correlationId,
-        type: verification.type,
-        reviewStatus: verification.reviewStatus,
-        reviewResult: verification.reviewResult,
-        createdAt: verification.createdAt,
-        user: verification.user,
-        // Include selected fields from raw data that admins might need
-        rawData: {
-          type: rawData.type,
-          reviewStatus: rawData.reviewStatus,
-          levelName: rawData.levelName,
-          clientId: rawData.clientId,
-          sandboxMode: rawData.sandboxMode,
-          reviewResult: rawData.reviewResult,
-          rejectLabels: rawData.rejectLabels || []
-        }
-      };
-    });
-    
-    res.json(formattedVerifications);
+    res.json(verifications);
   } catch (error) {
     console.error('Error fetching KYC verifications:', error);
-    res.status(500).json({ message: 'Failed to fetch KYC verifications' });
+    res.status(500).json({ 
+      message: 'Failed to fetch KYC verifications',
+      error: error.message 
+    });
   }
 });
 
-// Get detailed KYC verification by ID
+// Get details for a specific KYC verification
 router.get('/kyc-verifications/:id', isAdmin, async (req, res) => {
   try {
+    const { id } = req.params;
+    
+    // Get KYC verification details
     const verification = await prisma.kycVerification.findUnique({
-      where: {
-        id: parseInt(req.params.id)
-      },
+      where: { id: parseInt(id) },
       include: {
-        user: {
+        users: {
           select: {
             id: true,
             email: true,
             first_name: true,
-            last_name: true,
-            issuer: true
+            last_name: true
           }
         }
       }
     });
     
     if (!verification) {
-      return res.status(404).json({ message: 'Verification not found' });
+      return res.status(404).json({ message: 'KYC verification not found' });
     }
     
-    // Parse the raw JSON data to provide all details
-    let rawData = {};
-    try {
-      rawData = JSON.parse(verification.rawData);
-    } catch (e) {
-      console.error('Error parsing verification raw data:', e);
-    }
+    // Get personal information if available
+    const personalInfo = await prisma.kyc_personal_info.findFirst({
+      where: { applicant_id: verification.applicant_id }
+    });
     
-    // Combine the verification record with the parsed raw data
-    const detailedVerification = {
+    // Get document information if available
+    const documents = await prisma.KycDocument.findMany({
+      where: { applicant_id: verification.applicant_id }
+    });
+    
+    // Also get complete record if available
+    const completeRecord = await prisma.kyc_complete_records.findFirst({
+      where: { applicant_id: verification.applicant_id }
+    });
+    
+    // Combine all data
+    const enrichedResponse = {
       ...verification,
-      parsedRawData: rawData
+      personalInfo: personalInfo || null,
+      documents: documents || [],
+      completeRecord: completeRecord || null
     };
     
-    res.json(detailedVerification);
+    res.json(enrichedResponse);
   } catch (error) {
     console.error('Error fetching KYC verification details:', error);
-    res.status(500).json({ message: 'Failed to fetch KYC verification details' });
+    res.status(500).json({ 
+      message: 'Failed to fetch KYC verification details',
+      error: error.message 
+    });
   }
 });
 
@@ -194,9 +234,9 @@ router.get('/wallets', isAdmin, async (req, res) => {
   try {
     const wallets = await prisma.wallet.findMany({
       include: {
-        user: {
+        users: {
           include: {
-            roles: true
+            userrole: true
           }
         }
       }
@@ -211,11 +251,11 @@ router.get('/wallets', isAdmin, async (req, res) => {
       is_custodial: wallet.is_custodial,
       created_at: wallet.created_at,
       user: {
-        id: wallet.user.id,
-        email: wallet.user.email,
-        first_name: wallet.user.first_name,
-        last_name: wallet.user.last_name,
-        roles: wallet.user.roles.map(role => role.role)
+        id: wallet.users.id,
+        email: wallet.users.email,
+        first_name: wallet.users.first_name,
+        last_name: wallet.users.last_name,
+        roles: wallet.users.userrole.map(role => role.role)
       }
     }));
 
@@ -232,11 +272,11 @@ router.get('/wallets/:walletId', isAdmin, async (req, res) => {
     const { walletId } = req.params;
     
     const wallet = await prisma.wallet.findUnique({
-      where: { id: parseInt(walletId) },
+      where: { id: walletId },
       include: {
-        user: {
+        users: {
           include: {
-            roles: true
+            userrole: true
           }
         }
       }
@@ -255,11 +295,11 @@ router.get('/wallets/:walletId', isAdmin, async (req, res) => {
       is_custodial: wallet.is_custodial,
       created_at: wallet.created_at,
       user: {
-        id: wallet.user.id,
-        email: wallet.user.email,
-        first_name: wallet.user.first_name,
-        last_name: wallet.user.last_name,
-        roles: wallet.user.roles.map(role => role.role)
+        id: wallet.users.id,
+        email: wallet.users.email,
+        first_name: wallet.users.first_name,
+        last_name: wallet.users.last_name,
+        roles: wallet.users.userrole.map(role => role.role)
       }
     };
     
@@ -276,7 +316,7 @@ router.get('/wallets/:walletId/balance', isAdmin, async (req, res) => {
     const { walletId } = req.params;
     
     const wallet = await prisma.wallet.findUnique({
-      where: { id: parseInt(walletId) }
+      where: { id: walletId }
     });
     
     if (!wallet) {
@@ -313,7 +353,7 @@ router.get('/wallets/:walletId/transactions', isAdmin, async (req, res) => {
     const { walletId } = req.params;
     
     const wallet = await prisma.wallet.findUnique({
-      where: { id: parseInt(walletId) }
+      where: { id: walletId }
     });
     
     if (!wallet) {
@@ -375,7 +415,7 @@ router.get('/sumsub/applicants', isAdmin, async (req, res) => {
         sumsub_applicant_id: { in: applicantIds }
       },
       include: {
-        user: {
+        users: {
           select: {
             id: true,
             email: true,
@@ -390,7 +430,7 @@ router.get('/sumsub/applicants', isAdmin, async (req, res) => {
     const applicantUserMap = {};
     userAssociations.forEach(issuer => {
       if (issuer.sumsub_applicant_id) {
-        applicantUserMap[issuer.sumsub_applicant_id] = issuer.user;
+        applicantUserMap[issuer.sumsub_applicant_id] = issuer.users;
       }
     });
     
@@ -437,7 +477,7 @@ router.get('/sumsub/applicant/:applicantId', isAdmin, async (req, res) => {
     const issuer = await prisma.issuer.findFirst({
       where: { sumsub_applicant_id: applicantId },
       include: {
-        user: {
+        users: {
           select: {
             id: true,
             email: true,
@@ -451,7 +491,7 @@ router.get('/sumsub/applicant/:applicantId', isAdmin, async (req, res) => {
     // Enrich response with user data if found
     const enrichedResponse = {
       ...response.data,
-      user: issuer?.user || null
+      user: issuer?.users || null
     };
     
     res.json(enrichedResponse);
@@ -490,6 +530,294 @@ router.get('/sumsub/applicant/:applicantId/documents', isAdmin, async (req, res)
     res.status(500).json({ 
       message: 'Failed to fetch applicant documents from Sumsub',
       error: error.message
+    });
+  }
+});
+
+// Get personal info for a specific applicant
+router.get('/kyc-personal-info/:applicantId', isAdmin, async (req, res) => {
+  try {
+    const { applicantId } = req.params;
+    
+    // Get personal information if available
+    const personalInfo = await prisma.kyc_personal_info.findFirst({
+      where: { applicant_id: applicantId }
+    });
+    
+    if (!personalInfo) {
+      return res.status(404).json({ message: 'Personal information not found' });
+    }
+    
+    res.json(personalInfo);
+  } catch (error) {
+    console.error('Error fetching personal information:', error);
+    res.status(500).json({ 
+      message: 'Failed to fetch personal information',
+      error: error.message 
+    });
+  }
+});
+
+// Fix unassociated KYC verifications
+router.post('/fix-kyc-associations', isAdmin, async (req, res) => {
+  try {
+    console.log('Starting KYC verification association fix');
+    
+    // Find all KYC verifications without user associations
+    const unlinkedVerifications = await prisma.kycVerification.findMany({
+      where: {
+        userId: null
+      }
+    });
+    
+    console.log(`Found ${unlinkedVerifications.length} unlinked KYC verifications`);
+    
+    let linkedCount = 0;
+    let updatedIssuerCount = 0;
+    const errors = [];
+    
+    // Process each unlinked verification
+    for (const verification of unlinkedVerifications) {
+      try {
+        // Try to find a matching issuer by applicantId
+        let issuer = await prisma.issuer.findFirst({
+          where: { sumsub_applicant_id: verification.applicantId },
+          include: { users: true }
+        });
+        
+        // If no issuer found by applicantId, try to extract user ID from externalUserId
+        if (!issuer && verification.externalUserId) {
+          // Extract userId using our utility function
+          const extractedUserId = extractUserId(verification.externalUserId);
+          
+          if (extractedUserId) {
+            // Find user by ID
+            const user = await prisma.users.findUnique({
+              where: { id: extractedUserId }
+            });
+            
+            if (user) {
+              console.log(`Found user ${user.email} (ID: ${user.id}) via externalUserId ${verification.externalUserId}`);
+              
+              // Find this user's issuer
+              const userIssuer = await prisma.issuer.findFirst({
+                where: { users_id: user.id }
+              });
+              
+              if (userIssuer) {
+                // If the issuer doesn't have an applicantId yet, update it
+                if (!userIssuer.sumsub_applicant_id) {
+                  await prisma.issuer.update({
+                    where: { id: userIssuer.id },
+                    data: { 
+                      sumsub_applicant_id: verification.applicantId,
+                      sumsub_external_id: verification.externalUserId
+                    }
+                  });
+                  updatedIssuerCount++;
+                  console.log(`Updated issuer ${userIssuer.id} with applicantId ${verification.applicantId}`);
+                }
+                
+                // Update the verification record with the user ID
+                await prisma.kycVerification.update({
+                  where: { id: verification.id },
+                  data: { userId: user.id }
+                });
+                
+                linkedCount++;
+                console.log(`Linked verification ID ${verification.id} to user ID ${user.id}`);
+              } else {
+                // Even if there is no issuer, we can still link the verification to the user
+                await prisma.kycVerification.update({
+                  where: { id: verification.id },
+                  data: { userId: user.id }
+                });
+                
+                linkedCount++;
+                console.log(`Linked verification ID ${verification.id} to user ID ${user.id} (no issuer)`);
+              }
+            }
+          }
+        } else if (issuer) {
+          // If we found an issuer directly, update the verification with its user ID
+          await prisma.kycVerification.update({
+            where: { id: verification.id },
+            data: { userId: issuer.users_id }
+          });
+          
+          linkedCount++;
+          console.log(`Linked verification ID ${verification.id} to user ID ${issuer.users_id} via issuer`);
+        }
+      } catch (error) {
+        console.error(`Error processing verification ${verification.id}:`, error);
+        errors.push({ id: verification.id, error: error.message });
+      }
+    }
+    
+    res.json({
+      success: true,
+      total: unlinkedVerifications.length,
+      linked: linkedCount,
+      issuersUpdated: updatedIssuerCount,
+      errors: errors
+    });
+    
+  } catch (error) {
+    console.error('Error fixing KYC associations:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fix KYC associations',
+      error: error.message
+    });
+  }
+});
+
+// Generate DID for a verified issuer
+router.post('/issuers/:issuerId/generate-did', isAdmin, async (req, res) => {
+  try {
+    const { issuerId } = req.params;
+    
+    if (!issuerId || isNaN(parseInt(issuerId))) {
+      return res.status(400).json({ success: false, message: 'Valid issuer ID is required' });
+    }
+    
+    const parsedIssuerId = parseInt(issuerId);
+    
+    // Check if issuer exists and is verified
+    const issuer = await prisma.issuer.findUnique({
+      where: { id: parsedIssuerId },
+      include: {
+        users: true
+      }
+    });
+    
+    if (!issuer) {
+      return res.status(404).json({ success: false, message: 'Issuer not found' });
+    }
+    
+    if (!issuer.verification_status) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Issuer is not verified. Only verified issuers can have DIDs generated.'
+      });
+    }
+    
+    // Generate DID
+    const result = await generateDIDForIssuer(parsedIssuerId);
+    
+    if (result.success) {
+      return res.json({ 
+        success: true, 
+        message: 'DID generated successfully', 
+        did: result.did,
+        issuer: {
+          id: issuer.id,
+          userEmail: issuer.users.email,
+          userName: `${issuer.users.first_name} ${issuer.users.last_name}`,
+          companyName: issuer.company_name
+        }
+      });
+    } else {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to generate DID', 
+        error: result.error 
+      });
+    }
+  } catch (error) {
+    console.error('Error generating DID for issuer:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error generating DID', 
+      error: error.message 
+    });
+  }
+});
+
+// Generate DIDs for all verified issuers without DIDs
+router.post('/issuers/generate-all-dids', isAdmin, async (req, res) => {
+  try {
+    // Find all verified issuers without DIDs
+    const verifiedIssuersWithoutDIDs = await prisma.issuer.findMany({
+      where: { 
+        verification_status: true,
+        did: null
+      },
+      include: {
+        users: {
+          include: {
+            wallet: true
+          }
+        }
+      },
+      orderBy: { id: 'asc' }
+    });
+    
+    if (verifiedIssuersWithoutDIDs.length === 0) {
+      return res.json({
+        success: true, 
+        message: 'No verified issuers without DIDs found. All DIDs are up to date.',
+        issuersProcessed: 0,
+        successful: 0,
+        failed: 0,
+        results: []
+      });
+    }
+    
+    const results = [];
+    let successCount = 0;
+    let failureCount = 0;
+    
+    // Generate DIDs for each issuer sequentially
+    for (const issuer of verifiedIssuersWithoutDIDs) {
+      // Skip issuers without wallets
+      if (!issuer.users?.wallet) {
+        results.push({
+          id: issuer.id,
+          companyName: issuer.company_name,
+          success: false,
+          message: 'No wallet found for issuer'
+        });
+        failureCount++;
+        continue;
+      }
+      
+      const result = await generateDIDForIssuer(issuer.id);
+      
+      if (result.success) {
+        results.push({
+          id: issuer.id,
+          companyName: issuer.company_name,
+          success: true,
+          did: result.did
+        });
+        successCount++;
+      } else {
+        results.push({
+          id: issuer.id,
+          companyName: issuer.company_name,
+          success: false,
+          message: result.error
+        });
+        failureCount++;
+      }
+    }
+    
+    return res.json({
+      success: true,
+      message: 'Batch DID generation completed',
+      issuersProcessed: verifiedIssuersWithoutDIDs.length,
+      successful: successCount,
+      failed: failureCount,
+      results
+    });
+    
+  } catch (error) {
+    console.error('Error in batch DID generation:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Error generating DIDs in batch', 
+      error: error.message 
     });
   }
 });

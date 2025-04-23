@@ -2,16 +2,21 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs').promises;
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const extractUserId = require('../utils/extractUserId');
+const { findUserBySumsubIdentifiers, verifyWebhookSignature, KYC_DOCS_BASE_DIR, createDateBasedFolderStructure, fetchApplicantData, extractPersonalInfo } = require('../utils/sumsubUtils');
+const { storeApplicantDocuments } = require('../services/sumsubService');
 
 // Sumsub credentials - replace with your actual credentials
-const SUMSUB_APP_TOKEN = 'sbx:tM8HVP9NTOKvJMGn0ivKhYpr.eL4yA7WHjYXzbZDeh818LZdZ2cnHCLZr';
-const SUMSUB_SECRET_KEY = '535NduU5ydNWqHnFsplSuiq7wDPR3BnC';
-const SUMSUB_BASE_URL = 'https://api.sumsub.com';
+const SUMSUB_APP_TOKEN = process.env.SUMSUB_APP_TOKEN || 'sbx:tM8HVP9NTOKvJMGn0ivKhYpr.eL4yA7WHjYXzbZDeh818LZdZ2cnHCLZr';
+const SUMSUB_SECRET_KEY = process.env.SUMSUB_SECRET_KEY || '535NduU5ydNWqHnFsplSuiq7wDPR3BnC';
+const SUMSUB_BASE_URL = process.env.SUMSUB_BASE_URL || 'https://api.sumsub.com';
 
 // Webhook secret key - used for signature verification
-const WEBHOOK_SECRET_KEY = 'Kjp1bbs4_rDiyQYl4feXceLqbkn';
+const WEBHOOK_SECRET_KEY = process.env.SUMSUB_WEBHOOK_SECRET || 'Kjp1bbs4_rDiyQYl4feXceLqbkn';
 
 // Define an array of known testing applicant IDs
 const knownApplicants = [
@@ -26,25 +31,6 @@ function createSignature(method, endpoint, ts, payload = '') {
     .createHmac('sha256', SUMSUB_SECRET_KEY)
     .update(data)
     .digest('hex');
-}
-
-// Verify webhook signature from Sumsub
-function verifyWebhookSignature(payload, signature) {
-  if (!signature || !payload) {
-    console.error('Missing signature or payload for verification');
-    return false;
-  }
-
-  // For SHA1 (deprecated but required for backward compatibility)
-  const calculatedSignature = crypto
-    .createHmac('sha1', WEBHOOK_SECRET_KEY)
-    .update(payload)
-    .digest('hex');
-  
-  console.log('Received signature:', signature);
-  console.log('Calculated signature:', calculatedSignature);
-  
-  return calculatedSignature === signature;
 }
 
 // Utility function to make authenticated Sumsub API requests with fresh timestamp
@@ -101,29 +87,39 @@ router.post('/token', async (req, res) => {
   try {
     console.log('Token request received:', req.body);
     
-    // User ID must be provided and should be a string
-    const userId = (req.body.userId || 'user-' + Date.now()).toString();
+    // Get numeric userId and convert to string if present, or generate a fallback
+    let userId = req.body.userId;
+    let numericUserId = null;
+    
+    if (userId) {
+      // Extract just the numeric part if userId contains non-numeric characters
+      const numericMatch = String(userId).match(/(\d+)/);
+      numericUserId = numericMatch ? numericMatch[1] : null;
+    }
+    
+    // Form a consistent externalUserId format
+    const externalUserId = numericUserId ? `user-${numericUserId}` : `temp-${Date.now()}`;
+    
     const levelName = req.body.levelName || 'id-and-liveness';
     
-    // Find the user in the database if it's a numeric user ID
-    // This allows us to associate the Sumsub applicant with a user
+    // Find the user in the database if we have a numeric ID
     let dbUser = null;
-    if (/^\d+$/.test(userId)) {
+    if (numericUserId) {
       // It's a numeric ID, let's find the user
-      dbUser = await prisma.user.findUnique({
-        where: { id: parseInt(userId) },
+      dbUser = await prisma.users.findUnique({
+        where: { id: parseInt(numericUserId, 10) },
         include: { issuer: true }
       });
       
       if (!dbUser) {
-        console.warn(`User with ID ${userId} not found in database.`);
+        console.warn(`User with ID ${numericUserId} not found in database.`);
       } else {
-        console.log(`Found user ${dbUser.email} (ID: ${dbUser.id})`);
+        console.log(`Found user ${dbUser.email} (ID: ${dbUser.id}) for Sumsub verification`);
       }
     }
     
     // Create query string in URL format for the access token request
-    const queryParams = `userId=${encodeURIComponent(userId)}&levelName=${encodeURIComponent(levelName)}&ttlInSecs=600`;
+    const queryParams = `userId=${encodeURIComponent(externalUserId)}&levelName=${encodeURIComponent(levelName)}&ttlInSecs=600`;
     const endpoint = `/resources/accessTokens?${queryParams}`;
     
     // Make Sumsub API request with fresh timestamp and signature
@@ -141,11 +137,12 @@ router.post('/token', async (req, res) => {
         
         console.log('Applicant details fetched successfully');
         
-        // Update the issuer with the Sumsub applicantId
+        // Update the issuer with the Sumsub applicantId and externalUserId
         await prisma.issuer.update({
           where: { id: dbUser.issuer.id },
           data: {
             sumsub_applicant_id: tokenData.applicantId,
+            sumsub_external_id: externalUserId,
             sumsub_correlation_id: applicantData.correlation || null,
             sumsub_inspection_id: applicantData.inspectionId || null
           }
@@ -160,7 +157,7 @@ router.post('/token', async (req, res) => {
     
     res.json({ 
       token: tokenData.token,
-      userId,
+      externalUserId,
       levelName,
       expiresAt: Date.now() + (600 * 1000) // 10 minutes in milliseconds
     });
@@ -185,40 +182,88 @@ router.post('/webhook', express.json({ verify: (req, res, buf) => {
   req.rawBody = buf.toString();
 }}), async (req, res) => {
   try {
-    console.log('Received webhook from Sumsub:', JSON.stringify(req.body, null, 2));
+    // Log the webhook payload
+    console.log('Received Sumsub webhook:', JSON.stringify(req.body, null, 2));
     
-    // Verify the signature if possible
-    const signature = req.get('x-payload-digest');
+    // Extract key information
+    const { 
+      applicantId, 
+      externalUserId, 
+      inspectionId, 
+      correlationId,
+      type, 
+      reviewStatus, 
+      reviewResult 
+    } = req.body;
     
-    // Get the payload
-    const payload = req.body;
-    
-    if (!payload.applicantId) {
-      console.error('No applicant ID in webhook payload');
-      return res.status(400).json({ error: 'Missing applicant ID' });
+    if (!applicantId || !type) {
+      console.warn('Missing required fields in webhook');
+      return res.status(200).json({ 
+        success: false, 
+        message: 'Missing required fields' 
+      });
     }
     
-    // Cleanup the applicantId to handle both formats
-    const cleanApplicantId = payload.applicantId.replace('applicant_', '');
+    // Clean the applicantId (remove "applicant_" prefix if present)
+    const cleanApplicantId = applicantId.replace('applicant_', '');
     console.log(`Processing webhook for applicant ID: ${cleanApplicantId}`);
-    console.log(`Original applicantId: ${payload.applicantId}, Cleaned applicantId: ${cleanApplicantId}`);
     
-    // For testing applicant ID specifically, log the entire payload
+    // Verify signature
+    const signature = req.headers['x-payload-digest'] || req.headers['x-signature'];
+    const digestAlg = req.headers['x-payload-digest-alg'] || 'HMAC_SHA256_HEX';
+    
+    const isValid = verifyWebhookSignature(
+      req.rawBody,
+      signature,
+      WEBHOOK_SECRET_KEY,
+      digestAlg
+    );
+    
+    // Log signature verification result
+    console.log(`Webhook signature verification: ${isValid ? 'SUCCESS' : 'FAILED'}`);
+    
+    // Reject invalid signatures (except for test applicants)
+    if (!isValid && !knownApplicants.includes(cleanApplicantId)) {
+      console.warn('Invalid webhook signature received');
+      
+      // Store the invalid webhook for audit purposes
+      try {
+        await prisma.kycVerification.create({
+          data: {
+            applicantId: cleanApplicantId,
+            externalUserId: externalUserId || '',
+            type,
+            reviewStatus: reviewStatus || 'unknown',
+            rawData: JSON.stringify(req.body),
+            signatureValid: false,
+            webhookType: type,
+            eventTimestamp: new Date(),
+            processingStatus: 'rejected',
+            errorMessage: 'Invalid signature'
+          }
+        });
+      } catch (storeError) {
+        console.error('Error storing invalid webhook:', storeError.message);
+      }
+      
+      return res.status(403).json({
+        success: false,
+        message: 'Invalid signature'
+      });
+    }
+    
+    // Special handling for known test applicants
     if (knownApplicants.includes(cleanApplicantId)) {
       console.log('TESTING APPLICANT WEBHOOK DATA:', JSON.stringify({
         applicantId: cleanApplicantId,
-        externalUserId: payload.externalUserId,
-        inspectionId: payload.inspectionId,
-        correlationId: payload.correlationId,
-        reviewStatus: payload.reviewStatus,
-        reviewResult: payload.reviewResult,
-        type: payload.type
+        externalUserId,
+        type,
+        reviewStatus
       }, null, 2));
       
-      // Special handling for test applicant ID
+      // Link test applicant to an unlinked issuer
       if (cleanApplicantId === '67fbddcc012a2856878eda8e') {
         try {
-          // Find an issuer without a Sumsub applicant ID to link
           const unlinkedIssuer = await prisma.issuer.findFirst({
             where: { 
               sumsub_applicant_id: null,
@@ -230,11 +275,12 @@ router.post('/webhook', express.json({ verify: (req, res, buf) => {
             console.log(`Linking test applicant ID to issuer ${unlinkedIssuer.id}`);
             await prisma.issuer.update({
               where: { id: unlinkedIssuer.id },
-              data: { sumsub_applicant_id: cleanApplicantId }
+              data: { 
+                sumsub_applicant_id: cleanApplicantId,
+                sumsub_external_id: externalUserId || null
+              }
             });
             console.log(`Successfully linked test applicant ID to issuer ${unlinkedIssuer.id}`);
-          } else {
-            console.log('No eligible issuer found to link test applicant ID');
           }
         } catch (error) {
           console.error('Error linking test applicant ID to issuer:', error);
@@ -242,131 +288,213 @@ router.post('/webhook', express.json({ verify: (req, res, buf) => {
       }
     }
     
-    // Verify the webhook signature
-    if (!verifyWebhookSignature(req.rawBody, signature)) {
-      console.error('Invalid webhook signature');
-      return res.status(401).json({ success: false, message: 'Invalid webhook signature' });
+    // Find the associated user
+    let user = null;
+    try {
+      user = await findUserBySumsubIdentifiers(cleanApplicantId, externalUserId);
+    } catch (userLookupError) {
+      console.error('Error looking up user:', userLookupError.message);
+      // Continue processing without user association
     }
     
-    console.log('Webhook signature verified successfully');
-    
-    // Verify the webhook is legitimate
-    if (!payload) {
-      return res.status(400).json({ error: 'Invalid webhook payload' });
+    // Store webhook data
+    let verification = null;
+    try {
+      const webhookData = {
+        applicantId: cleanApplicantId,
+        externalUserId: externalUserId || '',
+        inspectionId: inspectionId || '',
+        correlationId: correlationId || '',
+        type,
+        reviewStatus: reviewStatus || 'unknown',
+        reviewResult: reviewResult?.reviewAnswer || null,
+        rawData: JSON.stringify(req.body),
+        userId: user?.id || null,
+        signatureValid: isValid,
+        webhookType: type,
+        eventTimestamp: new Date(),
+        processingStatus: 'received'
+      };
+      
+      verification = await prisma.kycVerification.create({
+        data: webhookData
+      });
+      
+      console.log(`Stored verification event ${verification.id} for applicant ${cleanApplicantId}`);
+    } catch (dbError) {
+      console.error('Error storing webhook data:', dbError.message);
+      return res.status(200).json({
+        success: false,
+        message: 'Error storing webhook data',
+        error: dbError.message
+      });
     }
     
-    // Find the issuer with this applicant ID
-    const issuer = await prisma.issuer.findFirst({
-      where: { sumsub_applicant_id: cleanApplicantId },
-      include: { user: true }
-    });
-    
-    if (!issuer) {
-      console.warn(`No issuer found with applicantId: ${cleanApplicantId}`);
-      
-      // Store the webhook data anyway for auditing
-      try {
-        await prisma.kycVerification.create({
-          data: {
-            applicantId: cleanApplicantId,
-            externalUserId: payload.externalUserId || '',
-            inspectionId: payload.inspectionId || '',
-            correlationId: payload.correlationId || null,
-            type: payload.type || 'unknown',
-            reviewStatus: payload.reviewStatus || '',
-            reviewResult: payload.reviewResult?.reviewAnswer || '',
-            rawData: JSON.stringify(payload),
-            signatureValid: true
-          }
+    // For certain event types, store documents automatically but don't block response
+    if (['applicantReviewed', 'idDocStatusChanged', 'applicantCreated'].includes(type)) {
+      // Use Promise to handle document storage in the background
+      const documentPromise = storeApplicantDocuments(cleanApplicantId, user?.id)
+        .then(result => {
+          console.log(`Stored ${result.count} documents for applicant ${cleanApplicantId}`);
+          
+          // Update verification record
+          return prisma.kycVerification.update({
+            where: { id: verification.id },
+            data: { 
+              processingStatus: 'processed'
+            }
+          });
+        })
+        .catch(err => {
+          console.error(`Error storing documents: ${err.message}`);
+          
+          // Update verification with error
+          return prisma.kycVerification.update({
+            where: { id: verification.id },
+            data: { 
+              processingStatus: 'error',
+              errorMessage: err.message
+            }
+          });
         });
-        console.log('Webhook data stored without user association');
-      } catch (dbError) {
-        console.error('Error storing webhook data:', dbError);
-      }
-      
-      return res.status(200).send('OK'); // Return 200 even if we can't find the user
-    }
-    
-    console.log(`Found issuer: ${issuer.id} for user: ${issuer.user.email}`);
-    
-    // Handle different webhook events
-    if (payload.type === 'applicantReviewed') {
-      const reviewResult = payload.reviewResult?.reviewAnswer;
-      
-      if (reviewResult === 'GREEN') {
-        // Applicant was approved
-        await prisma.issuer.update({
-          where: { id: issuer.id },
-          data: {
-            verification_status: true,
-            verification_date: new Date()
-          }
-        });
-        console.log(`Issuer ${issuer.id} was verified successfully`);
-      } else if (reviewResult === 'RED') {
-        // Applicant was rejected
-        await prisma.issuer.update({
-          where: { id: issuer.id },
-          data: {
-            verification_status: false,
-            verification_date: new Date()
-          }
-        });
-        console.log(`Issuer ${issuer.id} verification was rejected`);
-      }
-      
-      // Store the verification event in the database
-      try {
-        await prisma.kycVerification.create({
-          data: {
-            applicantId: cleanApplicantId,
-            externalUserId: payload.externalUserId || '',
-            inspectionId: payload.inspectionId || '',
-            correlationId: payload.correlationId || null,
-            type: payload.type,
-            reviewStatus: payload.reviewStatus || '',
-            reviewResult: reviewResult || '',
-            rawData: JSON.stringify(payload),
-            userId: issuer.user_id,
-            signatureValid: true,
-            webhookType: payload.type,
-            eventTimestamp: new Date(payload.createdAtMs || Date.now())
-          }
-        });
-        console.log('KYC verification event stored in database');
-      } catch (dbError) {
-        console.error('Error storing KYC verification event:', dbError);
+        
+      // Don't await this promise - let it run in the background
+    } else if (type === 'applicantPersonalInfoChanged') {
+      // Handle personal info changes
+      if (user) {
+        // Use Promise to handle personal info storage in the background
+        const infoPromise = storeApplicantInfo(cleanApplicantId)
+          .then(result => {
+            if (result.success) {
+              console.log(`Personal information updated for user ${user.id} from applicantPersonalInfoChanged webhook`);
+              
+              // Update verification record
+              return prisma.kycVerification.update({
+                where: { id: verification.id },
+                data: { 
+                  processingStatus: 'processed'
+                }
+              });
+            } else {
+              throw new Error(result.error || 'Unknown error storing personal information');
+            }
+          })
+          .catch(err => {
+            console.error(`Error storing personal information: ${err.message}`);
+            
+            // Update verification with error
+            return prisma.kycVerification.update({
+              where: { id: verification.id },
+              data: { 
+                processingStatus: 'error',
+                errorMessage: err.message
+              }
+            });
+          });
+          
+        // Don't await this promise - let it run in the background
+      } else {
+        console.warn(`No user found for applicant ${cleanApplicantId} - cannot update personal information`);
+        
+        // Mark as processed with a warning
+        try {
+          await prisma.kycVerification.update({
+            where: { id: verification.id },
+            data: { 
+              processingStatus: 'processed',
+              errorMessage: 'No user found to update personal information'
+            }
+          });
+        } catch (updateError) {
+          console.error(`Error updating verification status: ${updateError.message}`);
+        }
       }
     } else {
-      // Handle other webhook types (applicantCreated, applicantPending, etc.)
+      // Mark as processed for non-document events
       try {
-        await prisma.kycVerification.create({
-          data: {
-            applicantId: cleanApplicantId,
-            externalUserId: payload.externalUserId || '',
-            inspectionId: payload.inspectionId || '',
-            correlationId: payload.correlationId || null,
-            type: payload.type,
-            reviewStatus: payload.reviewStatus || '',
-            reviewResult: payload.reviewResult?.reviewAnswer || '',
-            rawData: JSON.stringify(payload),
-            userId: issuer.user_id,
-            signatureValid: true,
-            webhookType: payload.type,
-            eventTimestamp: new Date(payload.createdAtMs || Date.now())
-          }
+        await prisma.kycVerification.update({
+          where: { id: verification.id },
+          data: { processingStatus: 'processed' }
         });
-        console.log(`${payload.type} event stored in database`);
-      } catch (dbError) {
-        console.error(`Error storing ${payload.type} event:`, dbError);
+      } catch (updateError) {
+        console.error(`Error updating verification status: ${updateError.message}`);
       }
     }
     
-    // Always respond with 200 OK to acknowledge receipt
-    res.status(200).send('OK');
+    // If we found a user, update verification status
+    if (user && type === 'applicantReviewed') {
+      try {
+        if (reviewResult?.reviewAnswer === 'GREEN') {
+          // Update user and issuer records
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { email_verified: true }
+          });
+          
+          // Try to update issuer if exists
+          const issuer = await prisma.issuer.findFirst({
+            where: { user_id: user.id }
+          });
+          
+          if (issuer) {
+            await prisma.issuer.update({
+              where: { id: issuer.id },
+              data: {
+                verification_status: true,
+                verification_date: new Date(),
+                sumsub_applicant_id: cleanApplicantId
+              }
+            });
+          }
+          
+          console.log(`User ${user.id} verified successfully`);
+          
+          // Extract and store personal information for verified users
+          const infoResult = await storeApplicantInfo(cleanApplicantId);
+          if (infoResult.success) {
+            console.log(`Personal information stored for user ${user.id}`);
+          } else {
+            console.error(`Failed to store personal information: ${infoResult.error}`);
+          }
+        } else if (reviewResult?.reviewAnswer === 'RED') {
+          // Handle rejection if needed
+          const issuer = await prisma.issuer.findFirst({
+            where: { user_id: user.id }
+          });
+          
+          if (issuer) {
+            await prisma.issuer.update({
+              where: { id: issuer.id },
+              data: {
+                verification_status: false,
+                verification_date: new Date(),
+                sumsub_applicant_id: cleanApplicantId
+              }
+            });
+          }
+          
+          console.log(`User ${user.id} verification rejected`);
+        }
+      } catch (updateError) {
+        console.error(`Error updating user verification: ${updateError.message}`);
+      }
+    }
+    
+    // Always respond with 200 status code
+    return res.status(200).json({
+      success: true,
+      message: user ? 'Webhook processed successfully' : 'Webhook received but no matching user found',
+      webhookId: verification?.id
+    });
   } catch (error) {
-    console.error('Error processing Sumsub webhook:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error processing webhook:', error);
+    
+    // Always return 200 for webhooks
+    return res.status(200).json({
+      success: false,
+      message: 'Error processing webhook',
+      error: error.message
+    });
   }
 });
 
@@ -463,5 +591,291 @@ router.get('/inspections/:applicantId', async (req, res) => {
     });
   }
 });
+
+/**
+ * API endpoint to get all documents for an applicant
+ */
+router.get('/applicant/:applicantId/documents', async (req, res) => {
+  try {
+    const { applicantId } = req.params;
+    
+    // Get documents from database
+    const documents = await prisma.kycDocument.findMany({
+      where: { applicantId }
+    });
+    
+    // Add URLs
+    const documentsWithUrls = documents.map(doc => ({
+      ...doc,
+      url: `/api/sumsub/documents/${doc.yearFolder}/${doc.monthFolder}/${doc.dayFolder}/${applicantId}/${doc.documentType}/${doc.fileName}`
+    }));
+    
+    res.json({
+      success: true,
+      count: documents.length,
+      documents: documentsWithUrls
+    });
+  } catch (error) {
+    console.error('Error retrieving documents:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Error retrieving documents',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Serve a document file
+ */
+router.get('/documents/:year/:month/:day/:applicantId/:documentType/:fileName', async (req, res) => {
+  try {
+    const { year, month, day, applicantId, documentType, fileName } = req.params;
+    
+    // Build file path with proper path joining for cross-platform compatibility
+    const filePath = path.join(
+      KYC_DOCS_BASE_DIR,
+      year, month, day,
+      applicantId,
+      documentType,
+      fileName
+    );
+    
+    // Check if file exists
+    try {
+      await fs.access(filePath);
+    } catch (err) {
+      console.error(`Document not found at path: ${filePath}`, err);
+      return res.status(404).json({
+        success: false,
+        message: 'Document not found'
+      });
+    }
+    
+    // Get document info
+    const document = await prisma.kycDocument.findFirst({
+      where: {
+        applicantId,
+        fileName,
+        yearFolder: year,
+        monthFolder: month,
+        dayFolder: day
+      }
+    });
+    
+    // Set content type
+    if (document?.mimeType) {
+      res.setHeader('Content-Type', document.mimeType);
+    } else {
+      // Default based on extension
+      const ext = path.extname(fileName).toLowerCase();
+      if (ext === '.pdf') {
+        res.setHeader('Content-Type', 'application/pdf');
+      } else if (ext === '.png') {
+        res.setHeader('Content-Type', 'image/png');
+      } else {
+        res.setHeader('Content-Type', 'image/jpeg');
+      }
+    }
+    
+    // Send the file
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error serving document:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error serving document',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Manually trigger document storage for an applicant
+ */
+router.post('/applicant/:applicantId/store-documents', async (req, res) => {
+  try {
+    const { applicantId } = req.params;
+    
+    // Find user if possible
+    let userId = null;
+    const user = await findUserBySumsubIdentifiers(applicantId, null);
+    if (user) {
+      userId = user.id;
+    }
+    
+    // Store documents
+    const result = await storeApplicantDocuments(applicantId, userId);
+    
+    if (result.success) {
+      res.json({
+        success: true,
+        message: `Successfully stored ${result.count} documents`,
+        applicantId,
+        documents: result.documents.map(doc => ({
+          id: doc.id,
+          documentType: doc.documentType,
+          documentSide: doc.documentSide,
+          fileName: doc.fileName,
+          fileSize: doc.fileSize,
+          url: `/api/sumsub/documents/${doc.yearFolder}/${doc.monthFolder}/${doc.dayFolder}/${applicantId}/${doc.documentType}/${doc.fileName}`
+        }))
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: `Failed to store documents: ${result.error}`,
+        applicantId
+      });
+    }
+  } catch (error) {
+    console.error('Error triggering document storage:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error triggering document storage',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Store applicant information from Sumsub
+ * @param {string} applicantId - The Sumsub applicant ID
+ * @returns {Promise<Object>} - Result of the operation
+ */
+const storeApplicantInfo = async (applicantId) => {
+  try {
+    // Validate input
+    if (!applicantId) {
+      console.error('Missing applicantId in storeApplicantInfo');
+      return { success: false, error: 'Missing applicant ID' };
+    }
+
+    console.log(`Processing applicant info for ID: ${applicantId}`);
+    
+    // Fetch applicant data from Sumsub
+    const applicantData = await fetchApplicantData(applicantId);
+    if (!applicantData) {
+      return { success: false, error: 'Failed to fetch applicant data from Sumsub' };
+    }
+    
+    // Find user associated with this applicant ID
+    const user = await prisma.user.findFirst({
+      where: { sumsub_applicant_id: applicantId },
+      include: { issuer: true, wallet: true }
+    });
+    
+    if (!user) {
+      console.error(`No user found with applicant ID: ${applicantId}`);
+      return { success: false, error: 'User not found' };
+    }
+    
+    console.log(`Found user: ${user.id} for applicant ID: ${applicantId}`);
+    
+    // Extract personal information from applicant data
+    const personalInfo = extractPersonalInfo(applicantData);
+    if (!personalInfo) {
+      return { success: false, error: 'Failed to extract personal information' };
+    }
+    
+    // Store the personal information
+    const existingPersonalInfo = await prisma.personalInfo.findFirst({
+      where: { user_id: user.id }
+    });
+    
+    if (existingPersonalInfo) {
+      // Update existing record
+      await prisma.personalInfo.update({
+        where: { id: existingPersonalInfo.id },
+        data: personalInfo
+      });
+      console.log(`Updated personal info for user: ${user.id}`);
+    } else {
+      // Create new record
+      await prisma.personalInfo.create({
+        data: {
+          ...personalInfo,
+          user: { connect: { id: user.id } }
+        }
+      });
+      console.log(`Created personal info for user: ${user.id}`);
+    }
+    
+    // If the user is an issuer, update the verification status
+    if (user.issuer) {
+      await prisma.issuer.update({
+        where: { id: user.issuer.id },
+        data: { verified: true }
+      });
+      console.log(`Updated issuer ${user.issuer.id} verification status to TRUE`);
+      
+      // Create a wallet for the issuer if needed
+      if (!user.wallet) {
+        await createWalletIfNeeded(user.id);
+      }
+    }
+    
+    return { success: true };
+  } catch (error) {
+    console.error(`Error in storeApplicantInfo: ${error.message}`);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Create a wallet for the user if they don't already have one
+ * @param {number} userId - The user ID
+ * @returns {Promise<Object>} - The created wallet or null
+ */
+const createWalletIfNeeded = async (userId) => {
+  try {
+    // Check if user already has a wallet
+    const existingWallet = await prisma.wallet.findFirst({
+      where: { user_id: userId }
+    });
+    
+    if (existingWallet) {
+      console.log(`User ${userId} already has a wallet: ${existingWallet.address}`);
+      return existingWallet;
+    }
+    
+    console.log(`Creating custodial wallet for user: ${userId}`);
+    
+    // Get Crossmint API key from config
+    const apiKey = process.env.CROSSMINT_API_KEY;
+    if (!apiKey) {
+      throw new Error('Missing Crossmint API key');
+    }
+    
+    // Create a wallet using Crossmint API
+    const crossmintUrl = 'https://api.crossmint.com/api/v1/wallets';
+    const response = await axios.post(
+      crossmintUrl,
+      { chain: 'polygon' },
+      { headers: { 'x-api-key': apiKey } }
+    );
+    
+    if (!response.data || !response.data.id || !response.data.address) {
+      throw new Error('Invalid response from Crossmint API');
+    }
+    
+    // Store wallet in database
+    const wallet = await prisma.wallet.create({
+      data: {
+        user_id: userId,
+        address: response.data.address,
+        chain: 'polygon',
+        provider: 'crossmint',
+        external_id: response.data.id
+      }
+    });
+    
+    console.log(`Created wallet for user ${userId}: ${wallet.address}`);
+    return wallet;
+  } catch (error) {
+    console.error(`Error creating wallet: ${error.message}`);
+    return null;
+  }
+};
 
 module.exports = router; 

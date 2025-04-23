@@ -9,7 +9,14 @@ const isInvestor = (req, res, next) => {
     return res.status(401).json({ message: 'Unauthorized' });
   }
   
-  const isInvestorRole = req.user.roles.some(role => role.role === 'INVESTOR');
+  // Log user for debugging
+  console.log('User in isInvestor middleware:', req.user);
+  
+  // Check if userrole exists and then check if the user has the INVESTOR role
+  const userRoles = req.user.userrole || [];
+  console.log('User roles in middleware:', userRoles);
+  
+  const isInvestorRole = userRoles.some(role => role.role === 'INVESTOR');
   if (!isInvestorRole) {
     return res.status(403).json({ message: 'Forbidden - Investor access required' });
   }
@@ -25,7 +32,7 @@ router.get('/profile', isInvestor, async (req, res) => {
         user_id: req.user.id
       },
       include: {
-        user: {
+        users: {
           select: {
             email: true,
             first_name: true,
@@ -41,9 +48,9 @@ router.get('/profile', isInvestor, async (req, res) => {
 
     // For demo purposes, add some additional calculated fields
     const dashboardData = {
-      first_name: investorProfile.user.first_name,
-      last_name: investorProfile.user.last_name,
-      email: investorProfile.user.email,
+      first_name: investorProfile.users.first_name,
+      last_name: investorProfile.users.last_name,
+      email: investorProfile.users.email,
       investor_type: investorProfile.investor_type,
       accreditation_status: investorProfile.accreditation_status,
       kyc_verified: investorProfile.kyc_verified,

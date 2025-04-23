@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const jwt = require('jsonwebtoken');
+const { importSPKI, exportJWK } = require('jose');
 
 // Admin Login
 router.post('/admin/login', async (req, res) => {
@@ -12,10 +13,10 @@ router.post('/admin/login', async (req, res) => {
     console.log('Admin login attempt:', req.body.email);
     const { email, password } = req.body;
 
-    const user = await prisma.user.findUnique({
+    const user = await prisma.users.findUnique({
       where: { email },
       include: {
-        roles: true,
+        userrole: true,
         admin: true,
       },
     });
@@ -25,12 +26,21 @@ router.post('/admin/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    if (!user.roles.some(r => r.role === 'ADMIN')) {
+    // Debug user roles
+    console.log('User roles:', JSON.stringify(user.userrole));
+
+    // Check if the user has ADMIN role
+    if (!user.userrole || !user.userrole.some(r => r.role === 'ADMIN')) {
       console.log('User does not have ADMIN role:', email);
       return res.status(401).json({ message: 'Unauthorized access' });
     }
 
-    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    if (!user.password) {
+      console.log('Password missing for user:', email);
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {
       console.log('Invalid password for user:', email);
       return res.status(401).json({ message: 'Invalid credentials' });
@@ -38,25 +48,23 @@ router.post('/admin/login', async (req, res) => {
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user.id, email: user.email, roles: user.roles.map(r => r.role) },
+      { 
+        userId: user.id, 
+        email: user.email, 
+        roles: user.userrole.map(r => r.role),
+        isAdmin: true
+      },
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '1d' }
     );
 
-    req.login(user, (err) => {
-      if (err) {
-        console.error('Login error:', err);
-        return res.status(500).json({ message: 'Error logging in' });
+    return res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        roles: user.userrole.map(r => r.role),
       }
-      
-      return res.json({
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          roles: user.roles.map(r => r.role),
-        }
-      });
     });
   } catch (error) {
     console.error('Admin login error:', error);
@@ -70,10 +78,22 @@ router.post('/issuer/login', async (req, res) => {
     console.log('Issuer login attempt:', req.body.email);
     const { email, password } = req.body;
 
-    const user = await prisma.user.findUnique({
+    // Debug the full user object to see what's happening
+    const fullUser = await prisma.users.findUnique({
+      where: { email },
+    });
+    console.log('Full user object:', JSON.stringify(fullUser, null, 2));
+
+    // Check if userroles exist for this user
+    const userRoles = await prisma.userrole.findMany({
+      where: { user_id: fullUser?.id }
+    });
+    console.log('User roles from direct query:', JSON.stringify(userRoles, null, 2));
+
+    const user = await prisma.users.findUnique({
       where: { email },
       include: {
-        roles: true,
+        userrole: true,
         issuer: true,
       },
     });
@@ -83,12 +103,21 @@ router.post('/issuer/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    if (!user.roles.some(r => r.role === 'ISSUER')) {
+    // Debug user roles
+    console.log('User roles from include:', JSON.stringify(user.userrole));
+
+    // Check if the user has ISSUER role
+    if (!user.userrole || !user.userrole.some(r => r.role === 'ISSUER')) {
       console.log('User does not have ISSUER role:', email);
       return res.status(401).json({ message: 'Unauthorized access' });
     }
 
-    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    if (!user.password) {
+      console.log('Password missing for user:', email);
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {
       console.log('Invalid password for user:', email);
       return res.status(401).json({ message: 'Invalid credentials' });
@@ -96,25 +125,25 @@ router.post('/issuer/login', async (req, res) => {
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user.id, email: user.email, roles: user.roles.map(r => r.role) },
+      { 
+        userId: user.id, 
+        email: user.email, 
+        roles: user.userrole.map(r => r.role),
+        isIssuer: true
+      },
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '1d' }
     );
 
-    req.login(user, (err) => {
-      if (err) {
-        console.error('Login error:', err);
-        return res.status(500).json({ message: 'Error logging in' });
+    return res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        roles: user.userrole.map(r => r.role),
       }
-      
-      return res.json({
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          roles: user.roles.map(r => r.role),
-        }
-      });
     });
   } catch (error) {
     console.error('Issuer login error:', error);
@@ -128,10 +157,10 @@ router.post('/investor/login', async (req, res) => {
     console.log('Investor login attempt:', req.body.email);
     const { email, password } = req.body;
 
-    const user = await prisma.user.findUnique({
+    const user = await prisma.users.findUnique({
       where: { email },
       include: {
-        roles: true,
+        userrole: true,
         investor: true,
       },
     });
@@ -141,12 +170,21 @@ router.post('/investor/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    if (!user.roles.some(r => r.role === 'INVESTOR')) {
+    // Debug user roles
+    console.log('User roles:', JSON.stringify(user.userrole));
+
+    // Check if the user has INVESTOR role
+    if (!user.userrole || !user.userrole.some(r => r.role === 'INVESTOR')) {
       console.log('User does not have INVESTOR role:', email);
       return res.status(401).json({ message: 'Unauthorized access' });
     }
 
-    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    if (!user.password) {
+      console.log('Password missing for user:', email);
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {
       console.log('Invalid password for user:', email);
       return res.status(401).json({ message: 'Invalid credentials' });
@@ -154,25 +192,23 @@ router.post('/investor/login', async (req, res) => {
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user.id, email: user.email, roles: user.roles.map(r => r.role) },
+      { 
+        userId: user.id, 
+        email: user.email, 
+        roles: user.userrole.map(r => r.role),
+        isInvestor: true
+      },
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '1d' }
     );
 
-    req.login(user, (err) => {
-      if (err) {
-        console.error('Login error:', err);
-        return res.status(500).json({ message: 'Error logging in' });
+    return res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        roles: user.userrole.map(r => r.role),
       }
-      
-      return res.json({
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          roles: user.roles.map(r => r.role),
-        }
-      });
     });
   } catch (error) {
     console.error('Investor login error:', error);
@@ -183,9 +219,9 @@ router.post('/investor/login', async (req, res) => {
 // Issuer Registration
 router.post('/issuer/register', async (req, res) => {
   try {
-    const { email, password, first_name, last_name, company_name, company_registration_number, jurisdiction } = req.body;
+    const { email, password, firstName, lastName, company_name, company_registration_number, jurisdiction } = req.body;
 
-    const existingUser = await prisma.user.findUnique({
+    const existingUser = await prisma.users.findUnique({
       where: { email },
     });
 
@@ -194,15 +230,20 @@ router.post('/issuer/register', async (req, res) => {
     }
 
     const salt = await bcrypt.genSalt(10);
-    const password_hash = await bcrypt.hash(password, salt);
+    const hashedPassword = await bcrypt.hash(password, salt);
 
-    const user = await prisma.user.create({
+    // Use a default value for company_registration_number if not provided
+    const registrationNumber = company_registration_number || 'Not provided';
+
+    const user = await prisma.users.create({
       data: {
         email,
-        password_hash,
-        first_name,
-        last_name,
-        roles: {
+        password: hashedPassword,
+        first_name: firstName,
+        last_name: lastName,
+        created_at: new Date(),
+        updated_at: new Date(),
+        userrole: {
           create: {
             role: 'ISSUER',
           },
@@ -210,30 +251,42 @@ router.post('/issuer/register', async (req, res) => {
         issuer: {
           create: {
             company_name,
-            company_registration_number,
+            company_registration_number: registrationNumber,
             jurisdiction,
             verification_status: false,
           },
         },
       },
       include: {
-        roles: true,
+        userrole: true,
         issuer: true,
       },
     });
 
-    req.login(user, (err) => {
-      if (err) {
-        return res.status(500).json({ message: 'Error logging in' });
-      }
-      return res.json({
+    // Generate JWT token
+    const token = jwt.sign(
+      { 
+        userId: user.id, 
+        email: user.email, 
+        roles: user.userrole.map(r => r.role),
+        isIssuer: true
+      },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '1d' }
+    );
+
+    return res.json({
+      token,
+      user: {
         id: user.id,
         email: user.email,
-        roles: user.roles.map(r => r.role),
-      });
+        first_name: user.first_name,
+        last_name: user.last_name,
+        roles: user.userrole.map(r => r.role),
+      }
     });
   } catch (error) {
-    console.error(error);
+    console.error('Issuer registration error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -241,9 +294,9 @@ router.post('/issuer/register', async (req, res) => {
 // Investor Registration
 router.post('/investor/register', async (req, res) => {
   try {
-    const { email, password, first_name, last_name, investor_type } = req.body;
+    const { email, password, firstName, lastName, investor_type } = req.body;
 
-    const existingUser = await prisma.user.findUnique({
+    const existingUser = await prisma.users.findUnique({
       where: { email },
     });
 
@@ -252,15 +305,17 @@ router.post('/investor/register', async (req, res) => {
     }
 
     const salt = await bcrypt.genSalt(10);
-    const password_hash = await bcrypt.hash(password, salt);
+    const hashedPassword = await bcrypt.hash(password, salt);
 
-    const user = await prisma.user.create({
+    const user = await prisma.users.create({
       data: {
         email,
-        password_hash,
-        first_name,
-        last_name,
-        roles: {
+        password: hashedPassword,
+        first_name: firstName,
+        last_name: lastName,
+        created_at: new Date(),
+        updated_at: new Date(),
+        userrole: {
           create: {
             role: 'INVESTOR',
           },
@@ -275,23 +330,35 @@ router.post('/investor/register', async (req, res) => {
         },
       },
       include: {
-        roles: true,
+        userrole: true,
         investor: true,
       },
     });
 
-    req.login(user, (err) => {
-      if (err) {
-        return res.status(500).json({ message: 'Error logging in' });
-      }
-      return res.json({
+    // Generate JWT token
+    const token = jwt.sign(
+      { 
+        userId: user.id, 
+        email: user.email, 
+        roles: user.userrole.map(r => r.role),
+        isInvestor: true
+      },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '1d' }
+    );
+
+    return res.json({
+      token,
+      user: {
         id: user.id,
         email: user.email,
-        roles: user.roles.map(r => r.role),
-      });
+        first_name: user.first_name,
+        last_name: user.last_name,
+        roles: user.userrole.map(r => r.role),
+      }
     });
   } catch (error) {
-    console.error(error);
+    console.error('Investor registration error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -304,7 +371,7 @@ router.get('/check', (req, res) => {
       user: {
         id: req.user.id,
         email: req.user.email,
-        roles: req.user.roles.map(r => r.role),
+        roles: req.user.userrole ? req.user.userrole.map(r => r.role) : [],
       },
     });
   }
@@ -347,7 +414,11 @@ router.get(
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: req.user.id, email: req.user.email, roles: req.user.roles.map(r => r.role) },
+      { 
+        userId: req.user.id, 
+        email: req.user.email, 
+        roles: req.user.userrole ? req.user.userrole.map(r => r.role) : [] 
+      },
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '1d' }
     );
@@ -356,15 +427,15 @@ router.get(
     let redirectUrl = `${process.env.CLIENT_URL}`;
 
     // If user has admin role, redirect to admin dashboard
-    if (req.user.roles.some(r => r.role === 'ADMIN')) {
+    if (req.user.userrole?.some(r => r.role === 'ADMIN')) {
       redirectUrl += '/admin/dashboard';
     }
     // If user has issuer role, redirect to issuer dashboard
-    else if (req.user.roles.some(r => r.role === 'ISSUER')) {
+    else if (req.user.userrole?.some(r => r.role === 'ISSUER')) {
       redirectUrl += '/issuer/dashboard';
     }
     // If user has investor role, redirect to investor dashboard
-    else if (req.user.roles.some(r => r.role === 'INVESTOR')) {
+    else if (req.user.userrole?.some(r => r.role === 'INVESTOR')) {
       redirectUrl += '/investor/dashboard';
     }
 
@@ -402,7 +473,11 @@ router.get(
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: req.user.id, email: req.user.email, roles: req.user.roles.map(r => r.role) },
+      { 
+        userId: req.user.id, 
+        email: req.user.email, 
+        roles: req.user.userrole ? req.user.userrole.map(r => r.role) : [] 
+      },
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '1d' }
     );
@@ -411,15 +486,15 @@ router.get(
     let redirectUrl = `${process.env.CLIENT_URL}`;
 
     // If user has admin role, redirect to admin dashboard
-    if (req.user.roles.some(r => r.role === 'ADMIN')) {
+    if (req.user.userrole?.some(r => r.role === 'ADMIN')) {
       redirectUrl += '/admin/dashboard';
     }
     // If user has issuer role, redirect to issuer dashboard
-    else if (req.user.roles.some(r => r.role === 'ISSUER')) {
+    else if (req.user.userrole?.some(r => r.role === 'ISSUER')) {
       redirectUrl += '/issuer/dashboard';
     }
     // If user has investor role, redirect to investor dashboard
-    else if (req.user.roles.some(r => r.role === 'INVESTOR')) {
+    else if (req.user.userrole?.some(r => r.role === 'INVESTOR')) {
       redirectUrl += '/investor/dashboard';
     }
 
@@ -437,6 +512,68 @@ router.get('/me', (req, res) => {
     return res.status(401).json({ message: 'Not authenticated' });
   }
   res.json(req.user);
+});
+
+// Set initial password for accounts missing password hash
+router.post('/set-initial-password', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
+
+    const user = await prisma.users.findUnique({
+      where: { email },
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (user.password) {
+      return res.status(400).json({ message: 'User already has a password set' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    await prisma.users.update({
+      where: { id: user.id },
+      data: { password: hashedPassword },
+    });
+
+    return res.status(200).json({ message: 'Password set successfully' });
+  } catch (error) {
+    console.error('Error setting initial password:', error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// JWKS endpoint for Crossmint
+router.get('/.well-known/jwks.json', async (req, res) => {
+    try {
+        if (!process.env.JWT_PUBLIC_KEY) {
+            throw new Error('JWT_PUBLIC_KEY environment variable is not set');
+        }
+
+        // Decode and import the public key
+        const publicKeyPEM = Buffer.from(process.env.JWT_PUBLIC_KEY, 'base64').toString('utf8');
+        const publicKey = await importSPKI(publicKeyPEM, 'RS256');
+
+        // Export as JWK
+        const publicJwk = await exportJWK(publicKey);
+
+        // Add required JWK parameters
+        publicJwk.kid = process.env.CROSSMINT_PROJECT_ID;
+        publicJwk.use = 'sig';
+        publicJwk.alg = 'RS256';
+
+        res.json({ keys: [publicJwk] });
+    } catch (error) {
+        console.error('Error creating JWKS:', error);
+        res.status(500).json({ error: 'Failed to create JWKS' });
+    }
 });
 
 module.exports = router; 
