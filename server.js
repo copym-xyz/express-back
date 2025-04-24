@@ -18,7 +18,16 @@ const prisma = new PrismaClient();
 
 // CORS configuration
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://62ad-152-58-201-208.ngrok-free.app', 'https://api.sumsub.com'],
+  origin: function(origin, callback) {
+    const allowedOrigins = ['http://localhost:3000', 'https://aef0-103-175-137-128.ngrok-free.app', 'https://api.sumsub.com'];
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked for origin:', origin);
+      callback(null, false);
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Payload-Digest']

@@ -367,3 +367,18 @@ model wallet {
   users       users     @relation(fields: [user_id], references: [id])
   issuer      issuer?   @relation(fields: [issuer_id], references: [id])
 } 
+
+model webhookLog {
+  id            Int      @id @default(autoincrement())
+  type          String
+  payload       Json
+  signature     String?
+  status        String   @default("received")
+  provider      String   @default("sumsub")
+  processed     Boolean  @default(false)
+  processed_at  DateTime?
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+  
+  @@map("webhook_logs")
+} 

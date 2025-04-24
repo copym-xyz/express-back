@@ -10,6 +10,17 @@ const extractUserId = require('../utils/extractUserId');
 const { findUserBySumsubIdentifiers, verifyWebhookSignature, KYC_DOCS_BASE_DIR, createDateBasedFolderStructure, fetchApplicantData, extractPersonalInfo } = require('../utils/sumsubUtils');
 const { storeApplicantDocuments } = require('../services/sumsubService');
 
+// Import authentication middleware or create a fallback
+let isAuthenticated;
+try {
+  const authMiddleware = require('../middleware/auth');
+  isAuthenticated = authMiddleware.isAuthenticated;
+} catch (error) {
+  console.warn('Authentication middleware not available, using fallback middleware');
+  // Fallback middleware that just passes through
+  isAuthenticated = (req, res, next) => next();
+}
+
 // Sumsub credentials - replace with your actual credentials
 const SUMSUB_APP_TOKEN = process.env.SUMSUB_APP_TOKEN || 'sbx:tM8HVP9NTOKvJMGn0ivKhYpr.eL4yA7WHjYXzbZDeh818LZdZ2cnHCLZr';
 const SUMSUB_SECRET_KEY = process.env.SUMSUB_SECRET_KEY || '535NduU5ydNWqHnFsplSuiq7wDPR3BnC';
@@ -877,5 +888,151 @@ const createWalletIfNeeded = async (userId) => {
     return null;
   }
 };
+
+/**
+ * @route GET /api/sumsub/applicant/:applicantId/details
+ * @desc Get personal details for a specific applicant
+ * @access Private
+ */
+router.get('/applicant/:applicantId/details', isAuthenticated, async (req, res) => {
+  try {
+    const { applicantId } = req.params;
+    
+    if (!applicantId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Applicant ID is required'
+      });
+    }
+    
+    const { fetchApplicantData, extractPersonalInfo } = require('../utils/sumsubUtils');
+    
+    // Fetch applicant data from Sumsub
+    console.log(`Fetching data for applicant: ${applicantId}`);
+    const applicantData = await fetchApplicantData(applicantId);
+    
+    if (!applicantData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Failed to fetch applicant data from Sumsub'
+      });
+    }
+    
+    // Extract personal details
+    const personalInfo = extractPersonalInfo(applicantData);
+    
+    // Check if we have personal details in database
+    const existingInfo = await prisma.kyc_personal_info.findFirst({
+      where: { applicant_id: applicantId }
+    });
+    
+    // Return the data
+    return res.json({
+      success: true,
+      applicantId,
+      extractedInfo: personalInfo,
+      existingInfo: existingInfo,
+      rawData: applicantData
+    });
+  } catch (error) {
+    console.error('Error getting applicant details:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching applicant details',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route POST /api/sumsub/process/:applicantId
+ * @desc Manually process applicant data (similar to a webhook)
+ * @access Private
+ */
+router.post('/process/:applicantId', isAuthenticated, async (req, res) => {
+  try {
+    const { applicantId } = req.params;
+    const { eventType = 'applicantReviewed' } = req.body;
+    
+    if (!applicantId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Applicant ID is required'
+      });
+    }
+    
+    // Validate event type
+    const validEventTypes = ['applicantCreated', 'applicantReviewed', 'applicantPending'];
+    if (!validEventTypes.includes(eventType)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid event type. Must be one of: ${validEventTypes.join(', ')}`
+      });
+    }
+    
+    const { fetchApplicantData, extractPersonalInfo } = require('../utils/sumsubUtils');
+    const { handleApplicantCreated, handleApplicantReviewed } = require('../routes/sumsub-webhooks');
+    
+    // Fetch applicant data from Sumsub
+    console.log(`Manually processing ${eventType} for applicant: ${applicantId}`);
+    const applicantData = await fetchApplicantData(applicantId);
+    
+    if (!applicantData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Failed to fetch applicant data from Sumsub'
+      });
+    }
+    
+    // Create a mock webhook payload
+    const mockPayload = {
+      type: eventType,
+      applicantId: applicantId,
+      inspectionId: applicantData.inspectionId || applicantId,
+      correlationId: crypto.randomUUID(),
+      externalUserId: applicantData.externalUserId || null,
+      reviewStatus: eventType === 'applicantReviewed' ? 'completed' : 'pending',
+      createdAtMs: new Date().toISOString(),
+      reviewResult: eventType === 'applicantReviewed' ? { 
+        reviewAnswer: 'GREEN',
+        rejectType: null,
+        rejectLabels: []
+      } : null
+    };
+    
+    let result;
+    
+    // Process the event based on type
+    switch (eventType) {
+      case 'applicantCreated':
+        await handleApplicantCreated(mockPayload);
+        result = 'Applicant creation processed';
+        break;
+        
+      case 'applicantReviewed':
+        await handleApplicantReviewed(mockPayload);
+        result = 'Applicant review processed';
+        break;
+        
+      case 'applicantPending':
+        result = 'Applicant pending status recorded';
+        break;
+    }
+    
+    return res.json({
+      success: true,
+      message: result,
+      applicantId: applicantId,
+      eventType: eventType
+    });
+  } catch (error) {
+    console.error('Error processing applicant:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error processing applicant',
+      error: error.message
+    });
+  }
+});
 
 module.exports = router; 

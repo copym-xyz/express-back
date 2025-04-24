@@ -219,7 +219,18 @@ router.post('/investor/login', async (req, res) => {
 // Issuer Registration
 router.post('/issuer/register', async (req, res) => {
   try {
+    console.log('Issuer registration endpoint hit');
+    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    
     const { email, password, firstName, lastName, company_name, company_registration_number, jurisdiction } = req.body;
+
+    // Log extracted fields
+    console.log('Extracted fields:', { email, firstName, lastName, company_name, company_registration_number, jurisdiction });
+
+    if (!email || !password || !firstName || !lastName || !company_name || !jurisdiction) {
+      console.log('Missing required fields for issuer registration');
+      return res.status(400).json({ message: 'All fields are required', missing: Object.entries({email, password, firstName, lastName, company_name, jurisdiction}).filter(([_,v]) => !v).map(([k]) => k) });
+    }
 
     const existingUser = await prisma.users.findUnique({
       where: { email },
