@@ -9,14 +9,18 @@ const WEBHOOK_URL = 'https://62ad-152-58-201-208.ngrok-free.app/webhooks/crossmi
 
 async function createWallet(userId, isIssuer = false) {
     try {
+        // Get user email from database
+        const user = await prisma.users.findUnique({
+            where: { id: parseInt(userId) }
+        });
+
+        if (!user || !user.email) {
+            throw new Error(`User ${userId} not found or has no email`);
+        }
+
         const walletConfig = {
-            type: 'evm-smart-wallet',
-            config: {
-                adminSigner: {
-                    type: 'evm-fireblocks-custodial'
-                }
-            },
-            linkedUser: `userId:${userId}`,
+            type: 'evm-mpc-wallet',
+            linkedUser: `email:${user.email}`,
             webhookUrl: WEBHOOK_URL,
             metadata: {
                 role: isIssuer ? 'issuer' : 'user',
@@ -43,7 +47,7 @@ async function createWallet(userId, isIssuer = false) {
         const wallet = await prisma.wallet.create({
             data: {
                 address: response.data.address,
-                type: response.data.type || 'evm-smart-wallet',
+                type: response.data.type || 'evm-mpc-wallet',
                 chain: 'polygon', // Default chain as per schema
                 provider: 'crossmint',
                 user_id: userId,

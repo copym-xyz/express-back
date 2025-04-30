@@ -104,9 +104,15 @@ router.get('/users', isAdmin, async (req, res) => {
       email: user.email,
       first_name: user.first_name,
       last_name: user.last_name,
-      email_verified: user.email_verified,
       created_at: user.created_at,
+      is_active: true,
       roles: user.userrole,
+      // Add profile property that the frontend expects
+      profile: {
+        first_name: user.first_name,
+        last_name: user.last_name,
+        is_verified: user.is_verified
+      },
       // Add verification status based on role
       verification_status: user.userrole.some(role => role.role === 'ISSUER') && user.issuer 
         ? (user.issuer.verification_status ? 'VERIFIED' : 'PENDING')
@@ -132,19 +138,23 @@ router.get('/kyc-verifications', isAdmin, async (req, res) => {
     
     // If userId is provided, first get the issuer to find applicant ID
     if (userId) {
+      console.log(`Searching for verifications for user ID: ${userId}`);
       const issuer = await prisma.issuer.findFirst({
         where: { user_id: parseInt(userId) }
       });
       
       if (issuer && issuer.sumsub_applicant_id) {
+        console.log(`Found issuer with applicant ID: ${issuer.sumsub_applicant_id}`);
         whereCondition.applicant_id = issuer.sumsub_applicant_id;
       } else {
+        console.log(`No issuer found with applicant ID for user ID: ${userId}`);
         // If no issuer found with this userId, return empty results
         return res.json([]);
       }
     }
     
     // Get KYC verifications
+    console.log('Searching for KYC verifications with conditions:', JSON.stringify(whereCondition));
     const verifications = await prisma.kycVerification.findMany({
       where: whereCondition,
       orderBy: {
@@ -162,6 +172,7 @@ router.get('/kyc-verifications', isAdmin, async (req, res) => {
       }
     });
     
+    console.log(`Found ${verifications.length} verifications`);
     res.json(verifications);
   } catch (error) {
     console.error('Error fetching KYC verifications:', error);

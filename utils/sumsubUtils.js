@@ -470,7 +470,7 @@ const savePersonalInfo = async (applicantId, personalInfo) => {
     }
 
     console.log(`Saving personal info for applicant ${applicantId}`);
-
+    
     // Find existing record or create a new one
     const existingRecord = await prisma.kyc_personal_info.findFirst({
       where: {

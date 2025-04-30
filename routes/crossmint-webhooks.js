@@ -75,7 +75,7 @@ router.post('/', async (req, res) => {
                     await tx.wallet.create({
                         data: {
                             address,
-                            type: type || 'evm-smart-wallet',
+                            type: type || 'evm-mpc-wallet',
                             chain: 'evm',
                             is_custodial: true,
                             user_id: userId,

@@ -55,40 +55,40 @@ router.post('/', async (req, res) => {
 
     // Store webhook data
     try {
-      const webhookData = await prisma.webhookLog.create({
-        data: {
-          type: payload.type,
-          payload: payload,
+    const webhookData = await prisma.webhookLog.create({
+      data: {
+        type: payload.type,
+        payload: payload,
           signature: signature,
           status: 'received',
           provider: 'sumsub',
           processed: false,
           created_at: new Date(),
           updated_at: new Date()
-        }
-      });
+      }
+    });
 
-      // Handle different webhook types
-      switch (payload.type) {
-        case 'applicantReviewed':
-          await handleApplicantReviewed(payload);
-          break;
-        
-        case 'applicantPending':
-          console.log('Applicant pending review:', payload.applicantId);
-          break;
-        
-        case 'applicantCreated':
-          await handleApplicantCreated(payload);
-          break;
-        
+    // Handle different webhook types
+    switch (payload.type) {
+      case 'applicantReviewed':
+        await handleApplicantReviewed(payload);
+        break;
+      
+      case 'applicantPending':
+        console.log('Applicant pending review:', payload.applicantId);
+        break;
+      
+      case 'applicantCreated':
+        await handleApplicantCreated(payload);
+        break;
+      
         case 'applicantPersonalInfoChanged':
           await handleApplicantPersonalInfoChanged(payload);
-          break;
-        
-        default:
-          console.log('Unhandled webhook type:', payload.type);
-      }
+        break;
+      
+      default:
+        console.log('Unhandled webhook type:', payload.type);
+    }
 
       // Mark webhook as processed
       await prisma.webhookLog.update({
@@ -101,7 +101,7 @@ router.post('/', async (req, res) => {
         }
       });
 
-      res.status(200).json({ success: true });
+    res.status(200).json({ success: true });
     } catch (dbError) {
       console.error('Database error while processing webhook:', dbError);
       
@@ -261,9 +261,9 @@ async function handleApplicantReviewed(payload) {
               where: { 
                 applicant_id: applicantId,
                 is_primary: true
-              }
-            });
-            
+      }
+    });
+
             const addressInfoData = {
               address_type: 'RESIDENTIAL',
               is_primary: true,
@@ -482,17 +482,17 @@ async function handleApplicantCreated(payload) {
     if (issuer) {
       // Create initial wallet and DID
       try {
-        const walletResult = await createInitialWalletAndDID(issuer.id);
-        
-        if (!walletResult.success) {
-          console.error('Failed to create initial wallet and DID:', walletResult.error);
-          return;
-        }
+      const walletResult = await createInitialWalletAndDID(issuer.id);
+      
+      if (!walletResult.success) {
+        console.error('Failed to create initial wallet and DID:', walletResult.error);
+        return;
+      }
 
-        console.log(`Created initial wallet and DID for issuer ${issuer.id}:`, {
-          did: walletResult.did,
-          walletAddress: walletResult.wallet.address
-        });
+      console.log(`Created initial wallet and DID for issuer ${issuer.id}:`, {
+        did: walletResult.did,
+        walletAddress: walletResult.wallet.address
+      });
       } catch (error) {
         console.error(`Error creating wallet and DID for issuer ${issuer.id}:`, error);
       }

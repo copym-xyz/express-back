@@ -25,7 +25,7 @@ model kycVerification {
   updated_at        DateTime
   user_id           Int?
   webhook_type      String
-  users             users?   @relation(fields: [user_id], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  users             users?   @relation(fields: [user_id], references: [id])
 
   @@index([user_id], map: "kyc_verifications_user_id_fkey")
   @@map("kyc_verifications")
@@ -112,29 +112,29 @@ model investor {
 }
 
 model issuer {
-  id                           String       @id @default(uuid())
-  user_id                      Int         @unique
-  users                        users       @relation(fields: [user_id], references: [id])
-  company_name                 String
-  company_registration_number  String
-  jurisdiction                 String
-  verification_status          Boolean     @default(false)
-  verification_date            DateTime?
-  company_documents            Json?
-  is_active                    Boolean     @default(true)
-  is_kyb_completed             Boolean     @default(false)
-  mobile_number                String?
-  platform_client_id           String?
-  registration_date            DateTime    @default(now())
-  sumsub_applicant_id          String?
-  sumsub_correlation_id        String?
-  sumsub_external_id           String?
-  sumsub_inspection_id         String?
-  did                          String?     // DID for the issuer
-  did_created_at               DateTime?
-  created_at                   DateTime    @default(now())
-  updated_at                   DateTime    @updatedAt
-  wallet                       wallet?
+  id                          String    @id @default(uuid())
+  user_id                     Int       @unique
+  company_name                String
+  company_registration_number String
+  jurisdiction                String
+  verification_status         Boolean   @default(false)
+  verification_date           DateTime?
+  company_documents           Json?
+  is_active                   Boolean   @default(true)
+  is_kyb_completed            Boolean   @default(false)
+  mobile_number               String?
+  platform_client_id          String?
+  registration_date           DateTime  @default(now())
+  sumsub_applicant_id         String?
+  sumsub_correlation_id       String?
+  sumsub_external_id          String?
+  sumsub_inspection_id        String?
+  did                         String?
+  did_created_at              DateTime?
+  created_at                  DateTime  @default(now())
+  updated_at                  DateTime  @updatedAt
+  users                       users     @relation(fields: [user_id], references: [id])
+  wallet                      wallet?
 }
 
 model kyc_address_info {
@@ -354,31 +354,32 @@ model users {
 }
 
 model wallet {
-  id          String    @id @default(uuid())
-  user_id     Int       @unique
-  issuer_id   String?   @unique
+  id          String   @id @default(uuid())
+  user_id     Int      @unique
+  issuer_id   String?  @unique
   address     String
-  chain       String    @default("polygon")
-  type        String    @default("evm-smart-wallet")
-  provider    String    @default("crossmint")
-  did         String?   // DID in format did:ethr:${address}
-  created_at  DateTime  @default(now())
-  updated_at  DateTime  @updatedAt
-  users       users     @relation(fields: [user_id], references: [id])
-  issuer      issuer?   @relation(fields: [issuer_id], references: [id])
-} 
+  chain       String   @default("polygon")
+  type        String   @default("evm-mpc-wallet")
+  provider    String   @default("crossmint")
+  did         String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+  credentials Json?    @default(dbgenerated("(_utf8mb4\\'{}\\')"))
+  issuer      issuer?  @relation(fields: [issuer_id], references: [id])
+  users       users    @relation(fields: [user_id], references: [id])
+}
 
 model webhookLog {
-  id            Int      @id @default(autoincrement())
-  type          String
-  payload       Json
-  signature     String?
-  status        String   @default("received")
-  provider      String   @default("sumsub")
-  processed     Boolean  @default(false)
-  processed_at  DateTime?
-  created_at    DateTime @default(now())
-  updated_at    DateTime @updatedAt
-  
+  id           Int       @id @default(autoincrement())
+  type         String
+  payload      Json
+  signature    String?
+  status       String    @default("received")
+  provider     String    @default("sumsub")
+  processed    Boolean   @default(false)
+  processed_at DateTime?
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @updatedAt
+
   @@map("webhook_logs")
-} 
+}

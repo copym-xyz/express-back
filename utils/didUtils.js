@@ -108,17 +108,21 @@ async function createWalletForIssuer(issuerId, userId) {
       throw new Error('Missing Crossmint API key');
     }
     
+    // Get user email from database
+    const user = await prisma.users.findUnique({
+      where: { id: parseInt(userId) }
+    });
+
+    if (!user || !user.email) {
+      throw new Error(`User ${userId} not found or has no email`);
+    }
+    
     // Create a wallet using Crossmint API
     const response = await axios.post(
       'https://staging.crossmint.com/api/2022-06-09/wallets',
       { 
-        type: 'evm-smart-wallet',
-        config: {
-          adminSigner: {
-            type: 'evm-fireblocks-custodial'
-          }
-        },
-        linkedUser: `userId:${userId}`
+        type: 'evm-mpc-wallet',
+        linkedUser: `email:${user.email}`
       },
       {
         headers: {
@@ -143,7 +147,7 @@ async function createWalletForIssuer(issuerId, userId) {
         issuer_id: issuerId,
         address: walletData.address,
         chain: 'polygon',
-        type: 'evm-smart-wallet',
+        type: 'evm-mpc-wallet',
         provider: 'crossmint',
         external_id: walletData.id || walletData.address,
         created_at: new Date(),
