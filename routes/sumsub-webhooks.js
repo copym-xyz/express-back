@@ -8,6 +8,8 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const { verifyWebhookSignature, fetchApplicantData, extractPersonalInfo, savePersonalInfo } = require('../utils/sumsubUtils');
 const { generateDIDForIssuer, createInitialWalletAndDID } = require('../utils/didUtils');
+const { createCredentialType, getCredentialTypeByApplicantId } = require('../utils/credentialTypeUtils');
+const { issueVerificationCredential } = require('../utils/issuerVcUtils');
 
 // Raw body parser middleware for this route
 router.use(express.raw({ 
@@ -261,8 +263,8 @@ async function handleApplicantReviewed(payload) {
               where: { 
                 applicant_id: applicantId,
                 is_primary: true
-      }
-    });
+              }
+            });
 
             const addressInfoData = {
               address_type: 'RESIDENTIAL',
@@ -293,7 +295,7 @@ async function handleApplicantReviewed(payload) {
               });
             }
           } catch (addressError) {
-            console.error(`Error saving address info for applicant ${applicantId}:`, addressError);
+            console.error(`Error updating address info for applicant ${applicantId}:`, addressError);
           }
         }
       }
@@ -329,7 +331,7 @@ async function handleApplicantReviewed(payload) {
           where: { id: issuer.id },
           data: { 
             verification_status: true,
-            verified_at: new Date(),
+            verification_date: new Date(),
             updated_at: new Date()
           }
         });
@@ -341,12 +343,91 @@ async function handleApplicantReviewed(payload) {
           const didResult = await generateDIDForIssuer(issuer.id);
           if (didResult.success) {
             console.log(`Updated DID for verified issuer ${issuer.id}: ${didResult.did}`);
+            
+            // Create or get credential type
+            try {
+              const existingCredentialType = await getCredentialTypeByApplicantId(applicantId);
+              
+              const credentialType = existingCredentialType || await createCredentialType(applicantId, issuer.user_id, didResult.did);
+              console.log(`Created credential type for issuer ${issuer.id}, ID: ${credentialType.id}`);
+              
+              // Automatically issue a verifiable credential to the issuer
+              try {
+                const vcResult = await issueVerificationCredential(issuer.id);
+                
+                if (vcResult.success) {
+                  console.log(`Successfully issued verification credential to issuer ${issuer.id}:`, vcResult.id);
+                  console.log(`Check status with actionId: ${vcResult.actionId}`);
+                } else {
+                  console.error(`Failed to issue credential to issuer ${issuer.id}:`, vcResult.error);
+                }
+              } catch (vcError) {
+                console.error(`Error issuing credential to issuer ${issuer.id}:`, vcError);
+              }
+              
+            } catch (credentialTypeError) {
+              console.error(`Error creating credential type for issuer ${issuer.id}:`, credentialTypeError);
+            }
           } else {
             console.error(`Failed to update DID for issuer ${issuer.id}:`, didResult.error);
           }
         } catch (didError) {
           console.error(`Error updating DID for issuer ${issuer.id}:`, didError);
         }
+      }
+    }
+
+    // Update issuer verification status if KYC is successful
+    if (payload.reviewStatus === 'completed' && reviewResult?.reviewAnswer === 'GREEN') {
+      try {
+        console.log(`KYC successfully completed for applicant ${applicantId}, updating issuer status`);
+        
+        // Find the user associated with this applicant
+        const user = await prisma.users.findFirst({
+          where: {
+            OR: [
+              { applicant_id: applicantId },
+              { id: userId }
+            ]
+          },
+          include: {
+            userrole: true
+          }
+        });
+        
+        if (user) {
+          console.log(`Found user ${user.id} for applicant ${applicantId}`);
+          
+          // Check if user has issuer role
+          const isIssuer = user.userrole.some(role => role.role === 'ISSUER');
+          
+          if (isIssuer) {
+            console.log(`User ${user.id} is an issuer, updating verification status`);
+            
+            // Update user verification status
+            await prisma.users.update({
+              where: { id: user.id },
+              data: { 
+                is_verified: true,
+                verification_result: 'GREEN'
+              }
+            });
+            
+            // Update issuer verification status
+            const updatedIssuer = await prisma.issuer.updateMany({
+              where: { user_id: user.id },
+              data: { 
+                verification_status: true,
+                verification_date: new Date(),
+                is_kyb_completed: true
+              }
+            });
+            
+            console.log(`Updated verification status for issuer, affected rows: ${updatedIssuer.count}`);
+          }
+        }
+      } catch (verificationError) {
+        console.error('Error updating issuer verification status:', verificationError);
       }
     }
   } catch (error) {
@@ -652,19 +733,17 @@ async function handleApplicantPersonalInfoChanged(payload) {
               });
             }
           } catch (addressError) {
-            console.error(`Error saving address info for applicant ${applicantId}:`, addressError);
+            console.error(`Error updating address info for applicant ${applicantId}:`, addressError);
           }
         }
       }
     } else {
       console.warn(`No personal info available for applicant ${applicantId}`);
     }
-    
-    console.log(`Completed processing personal info change for ${applicantId}`);
   } catch (error) {
     console.error('Failed to handle applicant personal info change:', error);
     // Don't rethrow - we want to avoid 500 responses to Sumsub
   }
 }
 
-module.exports = router; 
+module.exports = router;

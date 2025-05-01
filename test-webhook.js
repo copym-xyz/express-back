@@ -1,122 +1,101 @@
 /**
- * Test script for Sumsub webhooks
- * This script simulates different webhook payloads and sends them to the webhook endpoint
+ * Test script for the Crossmint webhook handler
+ * This script simulates a webhook event from Crossmint
  */
 const axios = require('axios');
 const crypto = require('crypto');
-const { v4: uuidv4 } = require('uuid');
 
 // Configuration
-const WEBHOOK_URL = 'http://localhost:5000/webhooks/sumsub';
-const USER_ID = '16'; // Change this to a valid user ID in your database
+const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://2854-103-175-137-7.ngrok-free.app/webhooks/crossmint';
+const WEBHOOK_SECRET = process.env.CROSSMINT_WEBHOOK_SECRET || 'whsec_wnSCMaGf3uCDYpdXciDBZB30IEMCWt8E';
+const LOCAL_TEST_URL = 'http://localhost:5000/webhooks/crossmint';
 
-// Create a unique applicant ID for this test run
-const uniqueId = () => {
-  // Generate timestamp-based unique ID to avoid conflicts with previous test runs
-  const timestamp = Date.now();
-  return `test-${timestamp}`;
-};
-
-// Function to send a webhook
-async function sendWebhook(payload) {
-  console.log('Sending test webhook to', WEBHOOK_URL);
-  console.log('Payload:', JSON.stringify(payload, null, 2));
-  
-  try {
-    const response = await axios.post(WEBHOOK_URL, payload, {
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    console.log('Response:', response.status, response.statusText);
-    console.log('Response data:', response.data);
-    return response;
-  } catch (error) {
-    console.error('Error sending webhook:', error.message);
-    if (error.response) {
-      console.error('Response status:', error.response.status);
-      console.error('Response data:', error.response.data);
-    }
-  }
-}
-
-// Test webhook for applicantCreated
-async function testApplicantCreated() {
-  console.log('\n===== Testing applicantCreated webhook =====');
-  const applicantId = uniqueId();
-  
-  const payload = {
-    type: 'applicantCreated',
-    applicantId,
-    externalUserId: `user-${USER_ID}`,
-    info: {
-      firstName: 'John',
-      lastName: 'Doe',
-      nationality: 'US',
-      email: 'john@example.com',
-      phone: '+1234567890'
-    }
-  };
-  
-  return await sendWebhook(payload);
-}
-
-// Test webhook for applicantReviewed
-async function testApplicantReviewed() {
-  console.log('\n===== Testing applicantReviewed webhook =====');
-  const applicantId = uniqueId();
-  
-  const payload = {
-    type: 'applicantReviewed',
-    applicantId,
-    externalUserId: `user-${USER_ID}`,
-    reviewStatus: 'completed',
-    createdAtMs: new Date().toISOString(),
-    reviewResult: {
-      reviewAnswer: 'GREEN',
-      rejectType: null,
-      rejectLabels: []
+// Generate a sample webhook payload for an NFT minting event
+const payload = {
+  event: 'test-event-nfts.create.succeeded',
+  data: {
+    id: `test-nft-${Date.now()}`,
+    name: 'Test NFT',
+    description: 'This is a test NFT created via webhook simulation',
+    onChain: {
+      status: 'confirmed',
+      chain: 'ethereum-sepolia',
+      contractAddress: '0xb3c7330d1C0BC8b191Db59f65a0F34A3B07CA219',
+      tokenId: '123456',
+      transactionHash: '0xabc123'
     },
-    info: {
-      firstName: 'John',
-      lastName: 'Doe',
-      nationality: 'US',
-      email: 'john@example.com',
-      phone: '+1234567890',
-      dob: '1990-01-01',
-      gender: 'M',
-      addresses: [
+    image: 'https://www.crossmint.com/assets/crossmint/logo.png',
+    recipient: 'ethereum-sepolia:0xd427918cF8265F8D82E9d3d5d6eF281405059B3C',
+    metadata: {
+      name: 'Test NFT',
+      description: 'This is a test NFT created via webhook simulation',
+      image: 'https://www.crossmint.com/assets/crossmint/logo.png',
+      attributes: [
         {
-          country: 'US',
-          state: 'California',
-          city: 'San Francisco',
-          street: '123 Main St',
-          postcode: '94105',
-          buildingNumber: '42',
-          flatNumber: '101'
+          trait_type: 'Test Trait',
+          value: 'Test Value'
         }
       ]
     }
-  };
-  
-  return await sendWebhook(payload);
-}
+  },
+  timestamp: new Date().toISOString()
+};
 
-// Run all tests
-async function runTests() {
-  const testId = uniqueId();
-  console.log(`Using unique applicant ID: ${testId}`);
+// Generate a signature for the webhook
+const generateSignature = (payload, secret) => {
+  const hmac = crypto.createHmac('sha256', secret);
+  return hmac.update(JSON.stringify(payload)).digest('hex');
+};
+
+// Test function that sends the webhook to both the local and remote endpoints
+const testWebhooks = async () => {
+  const payloadString = JSON.stringify(payload);
+  const signature = generateSignature(payloadString, WEBHOOK_SECRET);
   
-  // Test scenario: Create an applicant
-  const createResponse = await testApplicantCreated();
-  
-  // Test scenario: Review and approve the applicant
-  if (createResponse && createResponse.status === 200) {
-    await testApplicantReviewed();
+  // Test the local endpoint
+  try {
+    console.log('Testing webhook against local endpoint...');
+    const localResponse = await axios.post(LOCAL_TEST_URL, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Webhook-Signature': signature
+      }
+    });
+    
+    console.log('Local webhook test response:', localResponse.data);
+    console.log('Local webhook test successful!');
+  } catch (localError) {
+    console.error('Local webhook test failed:', localError.message);
+    if (localError.response) {
+      console.error('Response data:', localError.response.data);
+      console.error('Response status:', localError.response.status);
+    }
   }
-}
+  
+  // Test the remote/ngrok endpoint
+  try {
+    console.log('\nTesting webhook against remote endpoint...');
+    const remoteResponse = await axios.post(WEBHOOK_URL, payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Webhook-Signature': signature
+      }
+    });
+    
+    console.log('Remote webhook test response:', remoteResponse.data);
+    console.log('Remote webhook test successful!');
+  } catch (remoteError) {
+    console.error('Remote webhook test failed:', remoteError.message);
+    if (remoteError.response) {
+      console.error('Response data:', remoteError.response.data);
+      console.error('Response status:', remoteError.response.status);
+    }
+  }
+};
 
-// Execute tests
-runTests().catch(console.error);
+// Run the tests
+testWebhooks().catch(error => {
+  console.error('Error running tests:', error);
+});
+
 

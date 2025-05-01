@@ -11,7 +11,7 @@ async function main() {
   // Create sample admin accounts
   const adminUsers = [
     {
-      email: 'admin1@example.com',
+      email: 'admin10@example.com',
       password: 'Admin123!',
       first_name: 'John',
       last_name: 'Admin',
@@ -19,7 +19,7 @@ async function main() {
       position: 'System Administrator',
     },
     {
-      email: 'admin2@example.com',
+      email: 'admin20@example.com',
       password: 'Admin123!',
       first_name: 'Sarah',
       last_name: 'Manager',
@@ -27,7 +27,7 @@ async function main() {
       position: 'Operations Manager',
     },
     {
-      email: 'admin3@example.com',
+      email: 'admin30@example.com',
       password: 'Admin123!',
       first_name: 'Michael',
       last_name: 'Director',
@@ -39,7 +39,8 @@ async function main() {
   // Create sample issuer accounts
   const issuerUsers = [
     {
-      email: 'issuer1@example.com',
+      id: 100, // Explicitly set ID to 100
+      email: 'issuer10@example.com',
       password: 'Issuer123!',
       first_name: 'David',
       last_name: 'Smith',
@@ -48,7 +49,8 @@ async function main() {
       jurisdiction: 'United States',
     },
     {
-      email: 'issuer2@example.com',
+      id: 101, // Explicitly set ID to 101
+      email: 'issuer20@example.com',
       password: 'Issuer123!',
       first_name: 'Emma',
       last_name: 'Johnson',
@@ -57,7 +59,8 @@ async function main() {
       jurisdiction: 'United Kingdom',
     },
     {
-      email: 'issuer3@example.com',
+      id: 102, // Explicitly set ID to 102
+      email: 'issuer30@example.com',
       password: 'Issuer123!',
       first_name: 'James',
       last_name: 'Wilson',
@@ -70,21 +73,21 @@ async function main() {
   // Create sample investor accounts
   const investorUsers = [
     {
-      email: 'investor1@example.com',
+      email: 'investor10@example.com',
       password: 'Investor123!',
       first_name: 'Robert',
       last_name: 'Brown',
       investor_type: 'INDIVIDUAL',
     },
     {
-      email: 'investor2@example.com',
+      email: 'investor20@example.com',
       password: 'Investor123!',
       first_name: 'Lisa',
       last_name: 'Anderson',
       investor_type: 'INSTITUTIONAL',
     },
     {
-      email: 'investor3@example.com',
+      email: 'investor30@example.com',
       password: 'Investor123!',
       first_name: 'Thomas',
       last_name: 'Taylor',
@@ -244,8 +247,10 @@ async function main() {
         }
       } else {
         console.log(`Creating new issuer user: ${issuer.email}`);
+        // Create user with explicitly set ID for issuers
         const newUser = await prisma.users.create({
           data: {
+            id: issuer.id, // Use the explicit ID from issuerUsers array
             email: issuer.email,
             password: password_hash,
             first_name: issuer.first_name,

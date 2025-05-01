@@ -1,0 +1,41 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model issuer_credential_type {
+  id                  Int       @id @default(autoincrement())
+  applicant_id        String
+  user_id             Int
+  first_name          String?
+  last_name           String?
+  email               String?
+  date_of_birth       DateTime?
+  verification_date   DateTime?
+  verification_status String?
+  review_result       String?
+  country_of_residence String?
+  source              String?
+  did                 String?
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @updatedAt
+
+  user                users?    @relation(fields: [user_id], references: [id])
+
+  @@index([user_id])
+  @@index([applicant_id])
+  @@index([did])
+}
+
+model users {
+  id                   Int                    @id @default(autoincrement())
+  email                String                 @unique
+  password             String
+  first_name           String
+  last_name            String
+  issuer_credential_type issuer_credential_type[]
+} 

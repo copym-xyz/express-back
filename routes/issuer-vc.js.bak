@@ -1,0 +1,285 @@
+/**
+ * API routes for issuing verifiable credentials to issuers
+ */
+const express = require('express');
+const router = express.Router();
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+const axios = require('axios');
+const { authenticateJWT } = require('../middleware/auth');
+
+// Constants from environment variables
+const API_KEY = process.env.CROSSMINT_API_KEY || 'sk_staging_666stoe1iL5FLscksmnoFJMDfD5FhivjjSfSJixawaVc81r9TRPoH6uaXiECY9P4zKsAv2HHpPcnsXHAhUrgSwBcjw6Hb1dpGLixfQTTJZZKttvaFU61dUThuCWhsahHLoKAXfeBa4XWHtjAQLzYgG4H62tSNyN2pweC8vMMvb5yPYrehZMgZUb5Skvbpe3z9RLfCXMjPDWoB8eZTZW6PW2P';
+const BASE_URL = 'https://staging.crossmint.com/api';
+const COLLECTION_ID = process.env.Collection_ID || '9ead4bd2-b0bb-45c9-957c-a640752d0c68';
+const TEMPLATE_ID = process.env.Template_ID || '1fb3506d-38cd-4fcb-95b9-b8aabef80797';
+const TYPE_ID = process.env.credential_type_id || 'crossmint:883f05c8-c651-417e-bdc2-6cd3a7ffe8dd:KYCVerification1745921157234';
+
+// Middleware to retrieve issuer data from token
+const getIssuerFromToken = async (req, res, next) => {
+  try {
+    const issuerId = req.user?.id;
+    if (!issuerId) {
+      return res.status(401).json({ success: false, message: 'Unauthorized - Invalid or missing issuer ID' });
+    }
+
+    // Fetch issuer data including KYC information
+    const issuer = await prisma.issuer.findUnique({
+      where: { id: issuerId },
+      include: {
+        user: true,
+        kyc_applicants: {
+          include: {
+            personal_info: true,
+            address_info: true
+          }
+        }
+      }
+    });
+
+    if (!issuer) {
+      return res.status(404).json({ success: false, message: 'Issuer not found' });
+    }
+
+    req.issuer = issuer;
+    next();
+  } catch (error) {
+    console.error('Error retrieving issuer data:', error);
+    res.status(500).json({ success: false, message: 'Server error while retrieving issuer data' });
+  }
+};
+
+// Middleware to validate issuer has required data for VC issuance
+const validateIssuerForVC = (req, res, next) => {
+  const { issuer } = req;
+
+  // Check if issuer has a wallet address
+  if (!issuer.wallet_address) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Missing wallet address for credential issuance'
+    });
+  }
+
+  // Check if issuer is verified
+  if (!issuer.verification_status) {
+    return res.status(400).json({
+      success: false, 
+      message: 'Issuer verification is required before credential issuance'
+    });
+  }
+
+  // Check if all required fields from KYC verification are available
+  const kycApplicant = issuer.kyc_applicants?.[0];
+  const personalInfo = kycApplicant?.personal_info;
+
+  if (!kycApplicant || !personalInfo) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Missing KYC information required for credential issuance'
+    });
+  }
+
+  // Check required fields based on create-credential-type.js schema
+  const requiredFields = {
+    applicantId: kycApplicant.applicant_id,
+    firstName: personalInfo.first_name,
+    lastName: personalInfo.last_name,
+    verificationStatus: issuer.verification_status ? 'verified' : 'pending'
+  };
+
+  const missingFields = Object.entries(requiredFields)
+    .filter(([_, value]) => !value)
+    .map(([key]) => key);
+
+  if (missingFields.length > 0) {
+    return res.status(400).json({
+      success: false,
+      message: `Missing required fields for credential issuance: ${missingFields.join(', ')}`
+    });
+  }
+
+  next();
+};
+
+// Route to issue a verifiable credential to the issuer's wallet
+router.post('/issue-vc', authenticateJWT, getIssuerFromToken, validateIssuerForVC, async (req, res) => {
+  try {
+    const { issuer } = req;
+    const kycApplicant = issuer.kyc_applicants[0];
+    const personalInfo = kycApplicant.personal_info;
+    const addressInfo = kycApplicant.address_info?.[0];
+
+    console.log('Issuing credential to wallet:', issuer.wallet_address);
+    
+    // Prepare credential data according to the schema
+    const issueDate = new Date();
+    const expiryDate = new Date(issueDate);
+    expiryDate.setFullYear(expiryDate.getFullYear() + 1); // Set expiry to 1 year from now
+
+    // Check which method to use based on available IDs
+    if (TEMPLATE_ID) {
+      // Method 1: Issue using template directly
+      const response = await axios({
+        method: 'POST',
+        url: `${BASE_URL}/v1-alpha1/credentials/templates/${TEMPLATE_ID}/vcs`,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-KEY': API_KEY
+        },
+        data: {
+          recipient: `ethereum-sepolia:${issuer.wallet_address}`,
+          credential: {
+            subject: {
+              applicantId: kycApplicant.applicant_id,
+              userId: issuer.user_id?.toString() || "",
+              firstName: personalInfo.first_name,
+              lastName: personalInfo.last_name,
+              email: personalInfo.email,
+              dateOfBirth: personalInfo.dob,
+              verificationDate: issuer.verified_at || issueDate,
+              verificationStatus: "verified",
+              reviewResult: "GREEN",
+              countryOfResidence: addressInfo?.country || "",
+              source: "Sumsub",
+              id: issuer.did || ""
+            },
+            expiresAt: expiryDate.toISOString().split('T')[0]
+          }
+        }
+      });
+
+      // Save the credential issuance record
+      await prisma.issuer_credentials.create({
+        data: {
+          issuer_id: issuer.id,
+          credential_id: response.data.id,
+          credential_type: 'KYC_VERIFICATION',
+          issued_date: new Date(),
+          expiry_date: expiryDate,
+          status: 'ISSUED',
+          metadata: JSON.stringify(response.data)
+        }
+      });
+
+      // Return success response
+      return res.status(200).json({
+        success: true,
+        message: 'Credential issued successfully',
+        id: response.data.id,
+        actionId: response.data.actionId || response.data.id
+      });
+    } else {
+      // Method 2: Use NFT minting endpoint for the collection
+      const response = await axios({
+        method: 'POST',
+        url: `${BASE_URL}/2022-06-09/collections/${COLLECTION_ID}/nfts`,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-KEY': API_KEY
+        },
+        data: {
+          metadata: {
+            name: "KYC Verification Credential",
+            description: "Proof of successful KYC verification",
+            image: "https://www.crossmint.com/assets/crossmint/logo.png",
+            attributes: [
+              {
+                trait_type: "Verification Status",
+                value: "Verified"
+              },
+              {
+                trait_type: "Issued Date",
+                value: new Date().toISOString().split('T')[0]
+              },
+              {
+                trait_type: "Expiration Date",
+                value: expiryDate.toISOString().split('T')[0]
+              },
+              {
+                trait_type: "Applicant ID",
+                value: kycApplicant.applicant_id
+              },
+              {
+                trait_type: "First Name",
+                value: personalInfo.first_name
+              },
+              {
+                trait_type: "Last Name",
+                value: personalInfo.last_name
+              },
+              {
+                trait_type: "Email",
+                value: personalInfo.email || ""
+              }
+            ]
+          },
+          recipient: `ethereum-sepolia:${issuer.wallet_address}`
+        }
+      });
+
+      // Save the credential issuance record
+      await prisma.issuer_credentials.create({
+        data: {
+          issuer_id: issuer.id,
+          credential_id: response.data.id,
+          credential_type: 'KYC_VERIFICATION',
+          issued_date: new Date(),
+          expiry_date: expiryDate,
+          status: 'ISSUED',
+          metadata: JSON.stringify(response.data)
+        }
+      });
+
+      // Return success response
+      return res.status(200).json({
+        success: true,
+        message: 'Credential issued successfully',
+        id: response.data.id,
+        actionId: response.data.actionId || response.data.id
+      });
+    }
+  } catch (error) {
+    console.error('Error issuing credential:', error);
+    
+    // Provide detailed error message
+    const errorMessage = error.response ? 
+      `API Error: ${error.response.status} - ${JSON.stringify(error.response.data)}` :
+      `Error: ${error.message}`;
+    
+    res.status(500).json({
+      success: false,
+      message: 'Failed to issue credential',
+      error: errorMessage
+    });
+  }
+});
+
+// Route to check credential status
+router.get('/credential/:id', authenticateJWT, async (req, res) => {
+  try {
+    const credentialId = req.params.id;
+    
+    const response = await axios({
+      method: 'GET',
+      url: `${BASE_URL}/v1-alpha1/credentials/${credentialId}`,
+      headers: {
+        'X-API-KEY': API_KEY
+      }
+    });
+    
+    res.status(200).json({
+      success: true,
+      credential: response.data
+    });
+  } catch (error) {
+    console.error('Error checking credential status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to check credential status',
+      error: error.message
+    });
+  }
+});
+
+module.exports = router; 

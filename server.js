@@ -106,6 +106,7 @@ app.use('/api/admin', require('./routes/admin'));
 app.use('/api/investor', require('./routes/investor'));
 app.use('/api/wallet', require('./routes/wallet'));
 app.use('/api/sumsub', require('./routes/sumsub'));
+app.use('/api/issuer-vc', require('./routes/issuer-vc'));
 
 // Add the webhooks route
 const webhooksRoutes = require('./routes/webhooks');
@@ -113,7 +114,7 @@ app.use('/webhooks', webhooksRoutes);
 
 // Webhook routes
 app.use('/webhooks/sumsub', sumsubWebhooksRouter);
-app.use('/webhooks/crossmint', crossmintWebhooks);
+app.use('/webhooks/crossmint', require('./routes/crossmint-webhooks'));
 
 // Test endpoint that always works
 app.get('/api/test', (req, res) => {

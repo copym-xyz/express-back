@@ -112,28 +112,29 @@ model investor {
 }
 
 model issuer {
-  id                          String    @id @default(uuid())
-  user_id                     Int       @unique
+  id                          String               @id @default(uuid())
+  user_id                     Int                  @unique
   company_name                String
   company_registration_number String
   jurisdiction                String
-  verification_status         Boolean   @default(false)
+  verification_status         Boolean              @default(false)
   verification_date           DateTime?
   company_documents           Json?
-  is_active                   Boolean   @default(true)
-  is_kyb_completed            Boolean   @default(false)
+  is_active                   Boolean              @default(true)
+  is_kyb_completed            Boolean              @default(false)
   mobile_number               String?
   platform_client_id          String?
-  registration_date           DateTime  @default(now())
+  registration_date           DateTime             @default(now())
   sumsub_applicant_id         String?
   sumsub_correlation_id       String?
   sumsub_external_id          String?
   sumsub_inspection_id        String?
   did                         String?
   did_created_at              DateTime?
-  created_at                  DateTime  @default(now())
-  updated_at                  DateTime  @updatedAt
-  users                       users     @relation(fields: [user_id], references: [id])
+  created_at                  DateTime             @default(now())
+  updated_at                  DateTime             @updatedAt
+  users                       users                @relation(fields: [user_id], references: [id])
+  issuer_credentials          issuer_credentials[]
   wallet                      wallet?
 }
 
@@ -329,28 +330,29 @@ model userrole {
 }
 
 model users {
-  id                   Int                    @id @default(autoincrement())
-  email                String                 @unique
-  password             String
-  first_name           String
-  last_name            String
-  created_at           DateTime               @default(now())
-  updated_at           DateTime
-  applicant_id         String?
-  is_verified          Boolean                @default(false)
-  verification_result  String?
-  admin                admin?
-  authprovider         authprovider[]
-  didwallet            didwallet[]
-  investor             investor?
-  issuer               issuer?
-  kyc_applicants       kyc_applicants[]
-  kyc_complete_records kyc_complete_records[]
-  kyc_documents        KycDocument[]
-  kyc_verifications    kycVerification[]
-  refreshtoken         refreshtoken[]
-  userrole             userrole[]
-  wallet               wallet?
+  id                     Int                      @id @default(autoincrement())
+  email                  String                   @unique
+  password               String
+  first_name             String
+  last_name              String
+  created_at             DateTime                 @default(now())
+  updated_at             DateTime
+  applicant_id           String?
+  is_verified            Boolean                  @default(false)
+  verification_result    String?
+  admin                  admin?
+  authprovider           authprovider[]
+  didwallet              didwallet[]
+  investor               investor?
+  issuer                 issuer?
+  issuer_credential_type issuer_credential_type[]
+  kyc_applicants         kyc_applicants[]
+  kyc_complete_records   kyc_complete_records[]
+  kyc_documents          KycDocument[]
+  kyc_verifications      kycVerification[]
+  refreshtoken           refreshtoken[]
+  userrole               userrole[]
+  wallet                 wallet?
 }
 
 model wallet {
@@ -364,7 +366,7 @@ model wallet {
   did         String?
   created_at  DateTime @default(now())
   updated_at  DateTime @updatedAt
-  credentials Json?    @default(dbgenerated("(_utf8mb4\\'{}\\')"))
+  credentials Json?
   issuer      issuer?  @relation(fields: [issuer_id], references: [id])
   users       users    @relation(fields: [user_id], references: [id])
 }
@@ -382,4 +384,51 @@ model webhookLog {
   updated_at   DateTime  @updatedAt
 
   @@map("webhook_logs")
+}
+
+model issuer_credentials {
+  id               Int       @id @default(autoincrement())
+  issuer_id        String
+  credential_id    String
+  credential_type  String
+  issued_date      DateTime
+  expiry_date      DateTime?
+  status           String
+  metadata         String?   @db.Text
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+  token_id         String?   // NFT token ID
+  contract_address String?   // NFT contract address
+  chain            String?   // Blockchain chain
+  transaction_hash String?   // Transaction hash for the NFT minting
+  image_url        String?   // URL to the NFT image
+  issuer           issuer    @relation(fields: [issuer_id], references: [id])
+
+  @@index([issuer_id])
+  @@index([credential_id])
+  @@index([token_id])
+  @@index([contract_address])
+}
+
+model issuer_credential_type {
+  id                   Int       @id @default(autoincrement())
+  applicant_id         String
+  user_id              Int
+  first_name           String?
+  last_name            String?
+  email                String?
+  date_of_birth        DateTime?
+  verification_date    DateTime?
+  verification_status  String?
+  review_result        String?
+  country_of_residence String?
+  source               String?
+  did                  String?
+  created_at           DateTime  @default(now())
+  updated_at           DateTime  @updatedAt
+  user                 users     @relation(fields: [user_id], references: [id])
+
+  @@index([user_id])
+  @@index([applicant_id])
+  @@index([did])
 }

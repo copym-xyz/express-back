@@ -58,12 +58,14 @@ router.post('/crossmint', express.json({ verify: (req, res, buf) => {
       try {
         await prisma.webhookLog.create({
           data: {
+            type: req.body.type || 'unknown',
+            payload: req.body,
+            signature: signature || '',
+            status: 'received',
             provider: 'crossmint',
-            event_type: req.body.type || 'unknown',
-            raw_data: JSON.stringify(req.body),
-            signature_valid: false,
             processed: false,
-            created_at: new Date()
+            created_at: new Date(),
+            updated_at: new Date()
           }
         });
       } catch (logError) {
@@ -76,12 +78,14 @@ router.post('/crossmint', express.json({ verify: (req, res, buf) => {
     // Store the webhook
     const log = await prisma.webhookLog.create({
       data: {
+        type: req.body.type || 'unknown',
+        payload: req.body,
+        signature: signature || '',
+        status: 'received',
         provider: 'crossmint',
-        event_type: req.body.type || 'unknown',
-        raw_data: JSON.stringify(req.body),
-        signature_valid: true,
         processed: false,
-        created_at: new Date()
+        created_at: new Date(),
+        updated_at: new Date()
       }
     });
     

@@ -24,6 +24,57 @@ const isAuthenticated = (req, res, next) => {
   next();
 };
 
+/**
+ * Middleware to authenticate using JWT token
+ * This is a real authentication middleware that verifies JWT tokens
+ */
+const authenticateJWT = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  
+  if (authHeader) {
+    const token = authHeader.split(' ')[1]; // Format: "Bearer TOKEN"
+    
+    jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', async (err, decoded) => {
+      if (err) {
+        console.error('JWT verification error:', err);
+        return res.status(403).json({ success: false, message: 'Token is invalid or expired' });
+      }
+      
+      try {
+        // Get the userId from the token - it could be in different fields based on how the token was created
+        const userId = decoded.userId || decoded.id;
+        
+        if (!userId) {
+          console.error('JWT missing userId field:', decoded);
+          return res.status(403).json({ success: false, message: 'Invalid token format' });
+        }
+        
+        // Fetch the user from the database to get the most current data
+        const user = await prisma.users.findUnique({
+          where: { id: userId },
+          include: { userrole: true }
+        });
+        
+        if (!user) {
+          console.error('User not found for JWT token userId:', userId);
+          return res.status(403).json({ success: false, message: 'User not found' });
+        }
+        
+        // Attach the full user object to the request
+        req.user = user;
+        console.log(`authenticateJWT - Found user: ${user.email} (ID: ${user.id})`);
+        
+        next();
+      } catch (error) {
+        console.error('Error in authenticateJWT middleware:', error);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+      }
+    });
+  } else {
+    return res.status(401).json({ success: false, message: 'Authorization header not provided' });
+  }
+};
+
 // Middleware to check if user is authenticated and is an admin
 const isAdmin = (req, res, next) => {
   // First check if user is authenticated
@@ -37,6 +88,28 @@ const isAdmin = (req, res, next) => {
     
     next();
   });
+};
+
+// Check if user is issuer
+const isIssuer = (req, res, next) => {
+  if (!req.user) {
+    console.error('No user object found in request');
+    return res.status(401).json({ success: false, message: 'Authentication required' });
+  }
+  
+  console.log('User in isIssuer middleware:', req.user);
+  console.log('User roles in middleware:', req.user.roles || req.user.userrole);
+  
+  // Check if user has issuer role
+  const roles = req.user.roles || 
+                (req.user.userrole && Array.isArray(req.user.userrole) ? req.user.userrole.map(r => r.role) : []);
+  
+  if (!roles.includes('ISSUER')) {
+    return res.status(403).json({ success: false, message: 'Forbidden - Issuer access required' });
+  }
+  
+  console.log('Fetching profile for issuer:', req.user.userId || req.user.id);
+  next();
 };
 
 // For testing purposes, this middleware is a placeholder
@@ -54,6 +127,8 @@ const isAdminMock = (req, res, next) => {
 // Use the mock version for now to allow testing without authentication
 module.exports = {
   isAuthenticated,
+  authenticateJWT,
   isAdmin: isAdminMock, // Switch to real isAdmin when authentication is implemented
-  isAdminReal: isAdmin
+  isAdminReal: isAdmin,
+  isIssuer
 }; 

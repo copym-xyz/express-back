@@ -216,6 +216,35 @@ router.post('/investor/login', async (req, res) => {
   }
 });
 
+// Helper function to get next issuer ID starting from 100
+async function getNextIssuerId() {
+  // Find the highest user ID that starts with 1 (issuer ID range)
+  const highestIssuer = await prisma.users.findFirst({
+    where: {
+      id: {
+        gte: 100,  // Greater than or equal to 100
+        lt: 1000   // Less than 1000 to set a reasonable upper bound
+      },
+      userrole: {
+        some: {
+          role: 'ISSUER'
+        }
+      }
+    },
+    orderBy: {
+      id: 'desc'  // Get the highest ID
+    }
+  });
+
+  // If no issuers exist yet, start from 100
+  if (!highestIssuer) {
+    return 100;
+  }
+  
+  // Return the next ID in sequence
+  return highestIssuer.id + 1;
+}
+
 // Issuer Registration
 router.post('/issuer/register', async (req, res) => {
   try {
@@ -246,32 +275,42 @@ router.post('/issuer/register', async (req, res) => {
     // Use a default value for company_registration_number if not provided
     const registrationNumber = company_registration_number || 'Not provided';
 
-    const user = await prisma.users.create({
-      data: {
-        email,
-        password: hashedPassword,
-        first_name: firstName,
-        last_name: lastName,
-        created_at: new Date(),
-        updated_at: new Date(),
-        userrole: {
-          create: {
-            role: 'ISSUER',
+    // Get next issuer ID
+    const nextIssuerId = await getNextIssuerId();
+    
+    // Create transaction to ensure ID consistency
+    const user = await prisma.$transaction(async (prisma) => {
+      // Create user with specific ID for issuers
+      const newUser = await prisma.users.create({
+        data: {
+          id: nextIssuerId,  // Use the custom issuer ID sequence
+          email,
+          password: hashedPassword,
+          first_name: firstName,
+          last_name: lastName,
+          created_at: new Date(),
+          updated_at: new Date(),
+          userrole: {
+            create: {
+              role: 'ISSUER',
+            },
+          },
+          issuer: {
+            create: {
+              company_name,
+              company_registration_number: registrationNumber,
+              jurisdiction,
+              verification_status: false,
+            },
           },
         },
-        issuer: {
-          create: {
-            company_name,
-            company_registration_number: registrationNumber,
-            jurisdiction,
-            verification_status: false,
-          },
+        include: {
+          userrole: true,
+          issuer: true,
         },
-      },
-      include: {
-        userrole: true,
-        issuer: true,
-      },
+      });
+      
+      return newUser;
     });
 
     // Generate JWT token

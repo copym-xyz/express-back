@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const { authenticateJWT } = require('../middleware/auth');
+const { issueVerificationCredential, checkCredentialStatus } = require('../utils/issuerVcUtils');
 
 // Middleware to check if user is authenticated and is an issuer
 const isIssuer = (req, res, next) => {
@@ -23,6 +25,51 @@ const isIssuer = (req, res, next) => {
   
   next();
 };
+
+// Add /me endpoint for the issuer profile data
+router.get('/me', authenticateJWT, async (req, res) => {
+  try {
+    console.log('Fetching me profile for issuer:', req.user.id);
+    
+    const issuerProfile = await prisma.issuer.findUnique({
+      where: {
+        user_id: req.user.id
+      },
+      include: {
+        users: {
+          select: {
+            email: true,
+            first_name: true,
+            last_name: true,
+          }
+        }
+      }
+    });
+
+    if (!issuerProfile) {
+      return res.status(404).json({ message: 'Issuer profile not found' });
+    }
+
+    // Format the response data
+    const profileData = {
+      id: issuerProfile.id,
+      email: issuerProfile.users.email,
+      first_name: issuerProfile.users.first_name,
+      last_name: issuerProfile.users.last_name,
+      company_name: issuerProfile.company_name,
+      company_registration_number: issuerProfile.company_registration_number,
+      jurisdiction: issuerProfile.jurisdiction,
+      verification_status: issuerProfile.is_verified,
+      address: issuerProfile.address || 'Not provided',
+      did: issuerProfile.did
+    };
+
+    res.json(profileData);
+  } catch (error) {
+    console.error('Error fetching issuer me profile:', error);
+    res.status(500).json({ message: 'Failed to fetch issuer profile' });
+  }
+});
 
 // Get issuer profile data
 router.get('/profile', isIssuer, async (req, res) => {
@@ -288,6 +335,277 @@ router.get('/personal-info', async (req, res) => {
   } catch (error) {
     console.error('Error fetching personal info:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+});
+
+/**
+ * Check verification status of the issuer profile
+ */
+router.get('/verification-status', authenticateJWT, async (req, res) => {
+  try {
+    console.log('Checking verification status for user:', req.user.id);
+    
+    if (!req.user || !req.user.id) {
+      console.error('No valid user in request');
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    // Find the issuer profile
+    const issuer = await prisma.issuer.findFirst({
+      where: { user_id: req.user.id }
+    });
+
+    if (!issuer) {
+      console.error(`No issuer profile found for user ID ${req.user.id}`);
+      return res.status(404).json({ success: false, message: 'Issuer profile not found' });
+    }
+
+    // Get wallet information
+    const wallet = await prisma.wallet.findUnique({
+      where: { user_id: req.user.id }
+    });
+
+    // Get KYC information
+    const kycStatus = await prisma.kyc_applicants.findFirst({
+      where: { user_id: req.user.id }
+    });
+
+    // Get credentials
+    const credentials = await prisma.issuer_credentials.findMany({
+      where: { issuer_id: issuer.id }
+    });
+
+    return res.json({
+      success: true,
+      verification: {
+        verified: issuer.verification_status,
+        verification_date: issuer.verification_date,
+        is_kyb_completed: issuer.is_kyb_completed
+      },
+      wallet: wallet ? {
+        exists: true,
+        address: wallet.address,
+        chain: wallet.chain
+      } : {
+        exists: false
+      },
+      kyc: kycStatus ? {
+        exists: true,
+        status: kycStatus.status,
+        result: kycStatus.result
+      } : {
+        exists: false
+      },
+      credentials: credentials.length > 0 ? {
+        count: credentials.length,
+        latest: credentials[0]
+      } : {
+        count: 0
+      }
+    });
+  } catch (error) {
+    console.error('Error checking verification status:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+/**
+ * Issue a verifiable credential to the issuer
+ * @route POST /api/issuer/issue-credential
+ * @desc Issue a verifiable credential to the authenticated issuer
+ */
+router.post('/issue-credential', isIssuer, async (req, res) => {
+  try {
+    console.log('Manual credential issuance requested for user:', req.user.id);
+
+    // Find the issuer
+    const issuer = await prisma.issuer.findFirst({
+      where: { user_id: req.user.id }
+    });
+
+    if (!issuer) {
+      return res.status(404).json({ success: false, message: 'Issuer profile not found' });
+    }
+
+    // Check verification status
+    if (!issuer.verification_status) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Your account is not verified yet. Verification is required to issue credentials.'
+      });
+    }
+
+    // Issue the credential
+    const result = await issueVerificationCredential(issuer.id);
+
+    if (!result.success) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to issue credential',
+        error: result.error
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Verifiable credential issuance initiated',
+      id: result.id,
+      actionId: result.actionId
+    });
+  } catch (error) {
+    console.error('Error issuing credential:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'An error occurred while issuing the credential',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Check the status of a verifiable credential
+ * @route GET /api/issuer/credential-status/:actionId
+ * @desc Check the status of a verifiable credential
+ */
+router.get('/credential-status/:actionId', isIssuer, async (req, res) => {
+  try {
+    const { actionId } = req.params;
+
+    if (!actionId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Action ID is required'
+      });
+    }
+
+    const result = await checkCredentialStatus(actionId);
+
+    return res.json(result);
+  } catch (error) {
+    console.error('Error checking credential status:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'An error occurred while checking credential status',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Get all credentials for the issuer
+ * @route GET /api/issuer/credentials
+ * @desc Get all credentials for the authenticated issuer
+ */
+router.get('/credentials', isIssuer, async (req, res) => {
+  try {
+    // Find the issuer
+    const issuer = await prisma.issuer.findFirst({
+      where: { user_id: req.user.id }
+    });
+
+    if (!issuer) {
+      return res.status(404).json({ success: false, message: 'Issuer profile not found' });
+    }
+
+    // Get all credentials for this issuer
+    const credentials = await prisma.issuer_credentials.findMany({
+      where: { issuer_id: issuer.id },
+      orderBy: { created_at: 'desc' }
+    });
+
+    return res.json({
+      success: true,
+      credentials: credentials.map(cred => ({
+        id: cred.id,
+        credential_id: cred.credential_id,
+        type: cred.credential_type,
+        issued_date: cred.issued_date,
+        expiry_date: cred.expiry_date,
+        status: cred.status,
+        created_at: cred.created_at
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching issuer credentials:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'An error occurred while fetching credentials',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Force update verification status if KYC is completed
+ * This helps fix inconsistencies between is_verified and verification_status fields
+ */
+router.post('/update-verification', authenticateJWT, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    console.log(`Force updating verification status for user ${userId}`);
+
+    // Find the issuer
+    const issuer = await prisma.issuer.findFirst({
+      where: { user_id: userId }
+    });
+
+    if (!issuer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Issuer profile not found'
+      });
+    }
+
+    // Check for KYC verification record
+    let kycCompleted = false;
+    
+    if (issuer.sumsub_applicant_id) {
+      const latestVerification = await prisma.kycVerification.findFirst({
+        where: { applicant_id: issuer.sumsub_applicant_id },
+        orderBy: { created_at: 'desc' }
+      });
+
+      // Check if KYC is completed with a GREEN result
+      if (latestVerification && 
+          (latestVerification.review_status === 'completed' || latestVerification.review_status === 'approved') &&
+          latestVerification.review_result === 'GREEN') {
+        kycCompleted = true;
+      }
+    }
+
+    if (kycCompleted || issuer.is_verified || issuer.verification_status) {
+      // Update both verification fields to ensure consistency
+      await prisma.issuer.update({
+        where: { id: issuer.id },
+        data: {
+          is_verified: true,
+          verification_status: true,
+          verification_date: new Date()
+        }
+      });
+
+      return res.json({
+        success: true,
+        message: 'Verification status updated successfully',
+        verification: {
+          is_verified: true,
+          verification_status: true,
+          verification_date: new Date()
+        }
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot update verification status. KYC verification not completed.'
+      });
+    }
+  } catch (error) {
+    console.error('Error updating verification status:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update verification status',
+      error: error.message
+    });
   }
 });
 

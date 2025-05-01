@@ -44,6 +44,7 @@ router.get('/', isIssuer, async (req, res) => {
   try {
     const userId = req.user.id;
     const role = req.user.role;
+    const chain = req.query.chain || 'ethereum-sepolia'; // Allow chain to be specified in query
 
     // Check if wallet already exists
     let wallet = await prisma.wallet.findFirst({
@@ -53,7 +54,7 @@ router.get('/', isIssuer, async (req, res) => {
     if (!wallet) {
       // Create new wallet if none exists
       const isIssuer = role === 'issuer';
-      const result = await createWallet(userId, isIssuer);
+      const result = await createWallet(userId, isIssuer, chain);
 
       if (!result.success) {
         console.error('Failed to create wallet:', result.error);
@@ -69,6 +70,46 @@ router.get('/', isIssuer, async (req, res) => {
     return res.json(wallet);
   } catch (error) {
     console.error('Error in wallet route:', error);
+    return res.status(500).json({ 
+      error: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Create wallet for a specific chain
+router.post('/create', isIssuer, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { chain } = req.body;
+    
+    if (!chain) {
+      return res.status(400).json({
+        error: 'Chain parameter is required',
+        supportedChains: Object.keys(require('../utils/crossmintUtils').SUPPORTED_CHAINS)
+      });
+    }
+    
+    // Create new wallet for the specified chain
+    const isIssuer = req.user.userrole.some(role => role.role === 'ISSUER');
+    const result = await createWallet(userId, isIssuer, chain);
+
+    if (!result.success) {
+      console.error('Failed to create wallet:', result.error);
+      return res.status(500).json({ 
+        error: 'Failed to create wallet',
+        details: process.env.NODE_ENV === 'development' ? result.error : undefined
+      });
+    }
+
+    return res.json({
+      success: true,
+      wallet: result.data.wallet,
+      chain: result.data.chain,
+      did: result.data.did
+    });
+  } catch (error) {
+    console.error('Error creating wallet:', error);
     return res.status(500).json({ 
       error: 'Internal server error',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -113,6 +154,152 @@ router.get('/balance', isIssuer, async (req, res) => {
     res.status(500).json({ 
       message: 'Failed to fetch wallet balance', 
       error: error.response?.data || error.message 
+    });
+  }
+});
+
+// Get NFTs owned by the wallet
+router.get('/nfts', isIssuer, async (req, res) => {
+  try {
+    // Get user's wallet
+    const wallet = await prisma.wallet.findFirst({
+      where: {
+        user_id: req.user.id
+      }
+    });
+
+    if (!wallet) {
+      return res.status(404).json({ message: 'No wallet found for this user' });
+    }
+
+    // Get issuer information
+    const issuer = await prisma.issuer.findFirst({
+      where: { user_id: req.user.id }
+    });
+
+    if (!issuer) {
+      return res.status(404).json({ message: 'No issuer profile found for this user' });
+    }
+
+    let nfts = [];
+    try {
+      // Get credentials/NFTs associated with this issuer - safely get without relying on token_id
+      const credentials = await prisma.issuer_credentials.findMany({
+        where: { issuer_id: issuer.id },
+        select: {
+          id: true,
+          credential_id: true,
+          credential_type: true,
+          status: true,
+          issued_date: true,
+          expiry_date: true,
+          metadata: true
+        },
+        orderBy: { created_at: 'desc' }
+      });
+
+      // Format the response
+      nfts = credentials.map(cred => {
+        // Parse the metadata if it exists
+        let metadata = {};
+        try {
+          if (cred.metadata) {
+            metadata = JSON.parse(cred.metadata);
+          }
+        } catch (error) {
+          console.warn(`Failed to parse metadata for credential ${cred.id}:`, error.message);
+        }
+
+        return {
+          id: cred.id,
+          credentialId: cred.credential_id,
+          type: cred.credential_type,
+          status: cred.status,
+          issuedDate: cred.issued_date,
+          expiryDate: cred.expiry_date,
+          chain: metadata?.onChain?.chain,
+          contractAddress: metadata?.onChain?.contractAddress,
+          tokenId: metadata?.onChain?.tokenId,
+          transactionHash: metadata?.onChain?.transactionHash,
+          metadata: metadata
+        };
+      });
+    } catch (dbError) {
+      console.error('Error fetching database NFTs:', dbError);
+      // Continue with empty nfts array
+    }
+
+    // Also fetch NFTs directly from Crossmint API for this wallet
+    let crossmintNfts = [];
+    try {
+      // Use the collections API endpoint which is more reliable
+      const CROSSMINT_API_KEY = process.env.CROSSMINT_API_KEY;
+      const CROSSMINT_BASE_URL = 'https://staging.crossmint.com/api';
+      
+      // First get the collections for the project
+      const collectionsResponse = await axios.get(
+        `${CROSSMINT_BASE_URL}/2022-06-09/collections`,
+        {
+          headers: {
+            "X-API-KEY": CROSSMINT_API_KEY,
+            "Content-Type": "application/json",
+          }
+        }
+      );
+      
+      // For each collection, get the NFTs owned by this wallet
+      if (collectionsResponse.data && Array.isArray(collectionsResponse.data.collections)) {
+        const collections = collectionsResponse.data.collections;
+        
+        for (const collection of collections) {
+          try {
+            // Get NFTs for this collection and wallet
+            const nftResponse = await axios.get(
+              `${CROSSMINT_BASE_URL}/2022-06-09/collections/${collection.id}/nfts?owner=${wallet.address}`,
+              {
+                headers: {
+                  "X-API-KEY": CROSSMINT_API_KEY,
+                  "Content-Type": "application/json",
+                }
+              }
+            );
+            
+            if (nftResponse.data && Array.isArray(nftResponse.data.nfts)) {
+              // Add collection info to each NFT
+              const collectionNfts = nftResponse.data.nfts.map(nft => ({
+                ...nft,
+                collectionId: collection.id,
+                collectionName: collection.name
+              }));
+              
+              crossmintNfts = [...crossmintNfts, ...collectionNfts];
+            }
+          } catch (collectionError) {
+            console.error(`Error fetching NFTs for collection ${collection.id}:`, collectionError.message);
+          }
+        }
+      }
+      
+      // Return both sets of NFTs
+      res.json({
+        dbNfts: nfts,
+        crossmintNfts: crossmintNfts,
+        total: nfts.length + crossmintNfts.length
+      });
+    } catch (crossmintError) {
+      console.error('Error fetching NFTs from Crossmint:', crossmintError.message);
+      // If Crossmint API fails, just return our database records
+      res.json({
+        dbNfts: nfts,
+        crossmintNfts: [],
+        total: nfts.length
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching wallet NFTs:', error);
+    res.status(500).json({ 
+      message: 'Failed to fetch wallet NFTs', 
+      error: error.message 
     });
   }
 });

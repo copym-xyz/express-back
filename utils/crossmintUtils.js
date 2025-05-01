@@ -2,12 +2,25 @@ const axios = require('axios');
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
-const CROSSMINT_API_KEY = 'sk_staging_666stoe1iL5FLscksmnoFJMDfD5FhivjjSfSJixawaVc81r9TRPoH6uaXiECY9P4zKsAv2HHpPcnsXHAhUrgSwBcjw6Hb1dpGLixfQTTJZZKttvaFU61dUThuCWhsahHLoKAXfeBa4XWHtjAQLzYgG4H62tSNyN2pweC8vMMvb5yPYrehZMgZUb5Skvbpe3z9RLfCXMjPDWoB8eZTZW6PW2P';
-const CROSSMINT_PROJECT_ID = '883f05c8-c651-417e-bdc2-6cd3a7ffe8dd';
+const CROSSMINT_API_KEY = process.env.CROSSMINT_API_KEY || 'sk_staging_666stoe1iL5FLscksmnoFJMDfD5FhivjjSfSJixawaVc81r9TRPoH6uaXiECY9P4zKsAv2HHpPcnsXHAhUrgSwBcjw6Hb1dpGLixfQTTJZZKttvaFU61dUThuCWhsahHLoKAXfeBa4XWHtjAQLzYgG4H62tSNyN2pweC8vMMvb5yPYrehZMgZUb5Skvbpe3z9RLfCXMjPDWoB8eZTZW6PW2P';
+const CROSSMINT_PROJECT_ID = process.env.CROSSMINT_PROJECT_ID || '883f05c8-c651-417e-bdc2-6cd3a7ffe8dd';
 const CROSSMINT_BASE_URL = 'https://staging.crossmint.com/api';
-const WEBHOOK_URL = 'https://62ad-152-58-201-208.ngrok-free.app/webhooks/crossmint';
+const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://2854-103-175-137-7.ngrok-free.app/webhooks/crossmint';
 
-async function createWallet(userId, isIssuer = false) {
+// Supported chains configuration
+const SUPPORTED_CHAINS = {
+  'ethereum-sepolia': {
+    didPrefix: 'did:ethr:sepolia'
+  },
+  'polygon-amoy': {
+    didPrefix: 'did:polygon:amoy'
+  }
+};
+
+// Default chain to use
+const DEFAULT_CHAIN = 'ethereum-sepolia';
+
+async function createWallet(userId, isIssuer = false, chain = DEFAULT_CHAIN) {
     try {
         // Get user email from database
         const user = await prisma.users.findUnique({
@@ -18,6 +31,12 @@ async function createWallet(userId, isIssuer = false) {
             throw new Error(`User ${userId} not found or has no email`);
         }
 
+        // Validate chain
+        if (!SUPPORTED_CHAINS[chain]) {
+            console.warn(`Unsupported chain ${chain} specified, defaulting to ${DEFAULT_CHAIN}`);
+            chain = DEFAULT_CHAIN;
+        }
+
         const walletConfig = {
             type: 'evm-mpc-wallet',
             linkedUser: `email:${user.email}`,
@@ -25,7 +44,8 @@ async function createWallet(userId, isIssuer = false) {
             metadata: {
                 role: isIssuer ? 'issuer' : 'user',
                 projectId: CROSSMINT_PROJECT_ID,
-                userId: userId
+                userId: userId,
+                chain: chain
             }
         };
 
@@ -40,15 +60,16 @@ async function createWallet(userId, isIssuer = false) {
             }
         );
 
-        // Generate DID from wallet address
-        const did = `did:ethr:${response.data.address}`;
+        // Generate DID from wallet address based on chain
+        const didPrefix = SUPPORTED_CHAINS[chain].didPrefix;
+        const did = `${didPrefix}:${response.data.address}`;
 
         // Store wallet and DID in database
         const wallet = await prisma.wallet.create({
             data: {
                 address: response.data.address,
                 type: response.data.type || 'evm-mpc-wallet',
-                chain: 'polygon', // Default chain as per schema
+                chain: chain, // Use the specified chain
                 provider: 'crossmint',
                 user_id: userId,
                 did: did,
@@ -80,7 +101,8 @@ async function createWallet(userId, isIssuer = false) {
             data: {
                 ...response.data,
                 did,
-                wallet
+                wallet,
+                chain
             }
         };
     } catch (error) {
@@ -96,8 +118,8 @@ async function getWalletBalance(walletAddress) {
     try {
         const url = new URL(`${CROSSMINT_BASE_URL}/v1-alpha2/wallets/${walletAddress}/balances`);
         url.search = new URLSearchParams({
-            tokens: 'eth,usdc,usdxm',
-            chains: 'base-sepolia,polygon-amoy'
+            tokens: 'eth,usdc',
+            chains: 'ethereum-sepolia,polygon-amoy'
         }).toString();
 
         const response = await axios.get(url.toString(), {
@@ -116,7 +138,8 @@ async function getWalletBalance(walletAddress) {
             success: true,
             data: {
                 ...response.data,
-                did: wallet?.did
+                did: wallet?.did,
+                chain: wallet?.chain
             }
         };
     } catch (error) {
@@ -132,5 +155,6 @@ module.exports = {
     createWallet,
     getWalletBalance,
     CROSSMINT_PROJECT_ID,
-    WEBHOOK_URL
+    WEBHOOK_URL,
+    SUPPORTED_CHAINS
 }; 
