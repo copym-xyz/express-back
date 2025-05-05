@@ -13,22 +13,30 @@ const crypto = require('crypto');
  * 
  * @param {string} method - HTTP method (GET, POST, etc.)
  * @param {string} url - Relative URL path with query parameters
- * @param {number} ts - Unix timestamp in seconds
+ * @param {string} ts - Unix timestamp in seconds
  * @param {string|Object} body - Request body (empty string for GET requests)
  * @param {string} secretKey - Your Sumsub secret key
  * @returns {string} - The generated signature
  */
 function generateSumsubApiSignature(method, url, ts, body, secretKey) {
+  // Log for debugging
+  console.log(`Generating Sumsub signature for method=${method}, url=${url}, ts=${ts}, secretKey=${secretKey ? '***' : 'undefined'}`);
+  
+  // Type conversion
+  method = (method || '').toUpperCase();
+  
   // Convert body to string if it's an object
   const bodyStr = typeof body === 'object' ? JSON.stringify(body) : (body || '');
   
-  // Create the string to sign: HTTP method + relative URL + timestamp + body
-  const signingStr = method.toUpperCase() + url + ts + bodyStr;
+  // Create the string to sign: timestamp + HTTP method + relative URL + body
+  const signingStr = ts + method + url + bodyStr;
   
   // Create HMAC SHA256 hash using the secret key
   const signature = crypto.createHmac('sha256', secretKey)
     .update(signingStr)
     .digest('hex');
+  
+  console.log(`Generated signature: ${signature.substr(0, 10)}... (truncated)`);
   
   return signature;
 }

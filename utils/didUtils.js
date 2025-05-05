@@ -1,169 +1,152 @@
-/**
- * DID (Decentralized Identifier) Utilities
- * Functions for generating and managing DIDs through Crossmint
- */
-require('dotenv').config();
-const axios = require('axios');
 const { PrismaClient } = require('@prisma/client');
-const { createWallet } = require('./crossmintUtils');
+const crypto = require('crypto');
+
 const prisma = new PrismaClient();
 
-/**
- * Generate a DID for an issuer
- * @param {number} issuerId - The ID of the issuer
- * @returns {Promise<Object>} - Result of the operation with DID or error
- */
-async function generateDIDForIssuer(issuerId) {
-  try {
-    // Check if issuer exists and is verified
-    const issuer = await prisma.issuer.findUnique({
-      where: { id: issuerId },
-      include: { wallet: true }
-    });
+// DID prefix configuration
+const DID_PREFIXES = {
+  'ethereum-sepolia': 'did:ethr:sepolia',
+  'polygon-mumbai': 'did:polygon:mumbai',
+  'base-sepolia': 'did:base:sepolia'
+};
 
+/**
+ * Generate a DID (Decentralized Identifier) for an issuer
+ * @param {number} userId - User ID
+ * @returns {Promise<string>} Generated DID
+ */
+async function generateDIDForIssuer(userId) {
+  try {
+    // Get the issuer
+    const issuer = await prisma.issuer.findFirst({
+      where: { user_id: userId }
+    });
+    
     if (!issuer) {
-      throw new Error('Issuer not found');
-    }
-
-    if (!issuer.is_verified) {
-      throw new Error('Issuer must be verified before generating DID');
-    }
-
-    // Create wallet if it doesn't exist
-    if (!issuer.wallet) {
-      const walletResult = await createWallet(issuerId);
-      
-      if (!walletResult.success) {
-        throw new Error(`Failed to create wallet: ${walletResult.error}`);
-      }
-
-      // Store wallet information
-      await prisma.wallet.create({
-        data: {
-          address: walletResult.data.address,
-          type: walletResult.data.type,
-          user_id: issuerId,
-          created_at: new Date(),
-          updated_at: new Date()
-        }
-      });
-
-      // Refresh issuer data
-      issuer.wallet = await prisma.wallet.findFirst({
-        where: { user_id: issuerId }
-      });
-    }
-
-    // Generate DID using wallet address
-    const did = `did:ethr:${issuer.wallet.address}`;
-
-    // Update issuer with DID
-    await prisma.issuer.update({
-      where: { id: issuerId },
-      data: { did }
-    });
-
-    return {
-      success: true,
-      did,
-      wallet: issuer.wallet
-    };
-  } catch (error) {
-    console.error('Error generating DID:', error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-}
-
-/**
- * Create a wallet for an issuer
- * @param {number} issuerId - The ID of the issuer
- * @param {number} userId - The ID of the user
- * @returns {Promise<Object>} - The created wallet
- */
-async function createWalletForIssuer(issuerId, userId) {
-  try {
-    // Input validation
-    if (!issuerId || !userId) {
-      throw new Error('Issuer ID and User ID are required');
+      throw new Error(`No issuer found for user ID ${userId}`);
     }
     
-    console.log(`Creating wallet for issuer ${issuerId}, user ${userId}`);
-    
-    // Check if wallet already exists
-    const existingWallet = await prisma.wallet.findFirst({
-      where: { issuer_id: issuerId }
-    });
-    
-    if (existingWallet) {
-      console.log(`Wallet already exists for issuer ${issuerId}: ${existingWallet.address}`);
-      return existingWallet;
+    // Check if the issuer already has a DID
+    if (issuer.did) {
+      console.log(`Issuer ${issuer.id} already has DID: ${issuer.did}`);
+      return issuer.did;
     }
     
-    // Get Crossmint API key
-    const apiKey = process.env.CROSSMINT_API_KEY;
-    if (!apiKey) {
-      throw new Error('Missing Crossmint API key');
-    }
-    
-    // Get user email from database
-    const user = await prisma.users.findUnique({
-      where: { id: parseInt(userId) }
-    });
-
-    if (!user || !user.email) {
-      throw new Error(`User ${userId} not found or has no email`);
-    }
-    
-    // Create a wallet using Crossmint API
-    const response = await axios.post(
-      'https://staging.crossmint.com/api/2022-06-09/wallets',
-      { 
-        type: 'evm-mpc-wallet',
-        linkedUser: `email:${user.email}`
-      },
-      {
-        headers: {
-          'x-api-key': apiKey,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    if (!response.data || !response.data.address) {
-      console.error('Invalid response from Crossmint API:', response.data);
-      throw new Error('Invalid response from Crossmint API');
-    }
-    
-    const walletData = response.data;
-    console.log(`Wallet created with address: ${walletData.address}`);
-    
-    // Store wallet in database
-    const wallet = await prisma.wallet.create({
-      data: {
+    // Get the wallet for this issuer
+    const wallet = await prisma.wallet.findFirst({
+      where: { 
         user_id: userId,
-        issuer_id: issuerId,
-        address: walletData.address,
-        chain: 'polygon',
-        type: 'evm-mpc-wallet',
-        provider: 'crossmint',
-        external_id: walletData.id || walletData.address,
-        created_at: new Date(),
+        is_active: true
+      }
+    });
+    
+    if (!wallet) {
+      throw new Error(`No active wallet found for issuer with user ID ${userId}`);
+    }
+    
+    // Generate DID based on chain and wallet address
+    const prefix = DID_PREFIXES[wallet.chain] || 'did:web';
+    const did = `${prefix}:${wallet.address}`;
+    
+    // Update the issuer record with the DID
+    await prisma.issuer.update({
+      where: { id: issuer.id },
+      data: {
+        did,
+        did_created_at: new Date(),
         updated_at: new Date()
       }
     });
     
-    console.log(`Stored wallet with ID ${wallet.id} for issuer ${issuerId}`);
-    return wallet;
+    console.log(`Generated DID for issuer ${issuer.id}: ${did}`);
+    return did;
   } catch (error) {
-    console.error(`Error creating wallet for issuer ${issuerId}:`, error);
+    console.error('Error generating DID for issuer:', error);
+    throw error;
+  }
+}
+
+/**
+ * Verify a DID
+ * @param {string} did - DID to verify
+ * @returns {boolean} Whether DID is valid
+ */
+function verifyDID(did) {
+  if (!did || typeof did !== 'string') return false;
+  
+  // Check DID format (did:method:specific-id)
+  const didPattern = /^did:[a-z0-9]+:.+$/;
+  return didPattern.test(did);
+}
+
+/**
+ * Get DID method from DID
+ * @param {string} did - DID
+ * @returns {string|null} DID method or null
+ */
+function getDIDMethod(did) {
+  if (!verifyDID(did)) return null;
+  
+  const parts = did.split(':');
+  return parts.length >= 2 ? parts[1] : null;
+}
+
+/**
+ * Generate all DIDs for issuers without DIDs
+ * @returns {Promise<Array>} Generated DIDs
+ */
+async function generateAllDIDs() {
+  try {
+    // Get all issuers without DIDs
+    const issuers = await prisma.issuer.findMany({
+      where: {
+        OR: [
+          { did: null },
+          { did: '' }
+        ]
+      },
+      select: {
+        id: true,
+        user_id: true,
+        company_name: true
+      }
+    });
+    
+    console.log(`Found ${issuers.length} issuers without DIDs`);
+    
+    const results = [];
+    
+    // Generate DID for each issuer
+    for (const issuer of issuers) {
+      try {
+        const did = await generateDIDForIssuer(issuer.user_id);
+        results.push({
+          issuerId: issuer.id,
+          userId: issuer.user_id,
+          did,
+          success: true
+        });
+      } catch (error) {
+        console.error(`Error generating DID for issuer ${issuer.id}:`, error);
+        results.push({
+          issuerId: issuer.id,
+          userId: issuer.user_id,
+          error: error.message,
+          success: false
+        });
+      }
+    }
+    
+    return results;
+  } catch (error) {
+    console.error('Error generating all DIDs:', error);
     throw error;
   }
 }
 
 module.exports = {
   generateDIDForIssuer,
-  createWalletForIssuer
+  generateAllDIDs,
+  verifyDID,
+  getDIDMethod
 }; 

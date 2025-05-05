@@ -1,160 +1,230 @@
 const axios = require('axios');
 const { PrismaClient } = require('@prisma/client');
+const crypto = require('crypto');
+const { SignJWT } = require('jose');
+const { generateDIDForIssuer } = require('./didUtils');
+
 const prisma = new PrismaClient();
 
-const CROSSMINT_API_KEY = process.env.CROSSMINT_API_KEY || 'sk_staging_666stoe1iL5FLscksmnoFJMDfD5FhivjjSfSJixawaVc81r9TRPoH6uaXiECY9P4zKsAv2HHpPcnsXHAhUrgSwBcjw6Hb1dpGLixfQTTJZZKttvaFU61dUThuCWhsahHLoKAXfeBa4XWHtjAQLzYgG4H62tSNyN2pweC8vMMvb5yPYrehZMgZUb5Skvbpe3z9RLfCXMjPDWoB8eZTZW6PW2P';
-const CROSSMINT_PROJECT_ID = process.env.CROSSMINT_PROJECT_ID || '883f05c8-c651-417e-bdc2-6cd3a7ffe8dd';
-const CROSSMINT_BASE_URL = 'https://staging.crossmint.com/api';
-const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://2854-103-175-137-7.ngrok-free.app/webhooks/crossmint';
+// API configuration
+const CROSSMINT_API_KEY = process.env.CROSSMINT_API_KEY || "sk_staging_666stoe1iL5FLscksmnoFJMDfD5FhivjjSfSJixawaVc81r9TRPoH6uaXiECY9P4zKsAv2HHpPcnsXHAhUrgSwBcjw6Hb1dpGLixfQTTJZZKttvaFU61dUThuCWhsahHLoKAXfeBa4XWHtjAQLzYgG4H62tSNyN2pweC8vMMvb5yPYrehZMgZUb5Skvbpe3z9RLfCXMjPDWoB8eZTZW6PW2P";
+const CROSSMINT_BASE_URL = "https://staging.crossmint.com/api";
+const CROSSMINT_PROJECT_ID = process.env.CROSSMINT_PROJECT_ID || "4ab05c30-bed2-44fd-b8e3-70a68cac2a00";
 
 // Supported chains configuration
 const SUPPORTED_CHAINS = {
   'ethereum-sepolia': {
-    didPrefix: 'did:ethr:sepolia'
+    name: 'Ethereum Sepolia',
+    type: 'evm-smart-wallet',
+    adminSigner: {
+      type: 'evm-keypair'
+    }
   },
-  'polygon-amoy': {
-    didPrefix: 'did:polygon:amoy'
+  'polygon-mumbai': {
+    name: 'Polygon Mumbai',
+    type: 'solana-smart-wallet',
+    adminSigner: {
+      type: 'solana-keypair'
+    }
+  },
+  'base-sepolia': {
+    name: 'Base Sepolia',
+    type: 'evm-smart-wallet',
+    adminSigner: {
+      type: 'evm-keypair'
+    }
   }
 };
 
-// Default chain to use
-const DEFAULT_CHAIN = 'ethereum-sepolia';
-
-async function createWallet(userId, isIssuer = false, chain = DEFAULT_CHAIN) {
-    try {
-        // Get user email from database
-        const user = await prisma.users.findUnique({
-            where: { id: parseInt(userId) }
-        });
-
-        if (!user || !user.email) {
-            throw new Error(`User ${userId} not found or has no email`);
-        }
-
-        // Validate chain
-        if (!SUPPORTED_CHAINS[chain]) {
-            console.warn(`Unsupported chain ${chain} specified, defaulting to ${DEFAULT_CHAIN}`);
-            chain = DEFAULT_CHAIN;
-        }
-
-        const walletConfig = {
-            type: 'evm-mpc-wallet',
-            linkedUser: `email:${user.email}`,
-            webhookUrl: WEBHOOK_URL,
-            metadata: {
-                role: isIssuer ? 'issuer' : 'user',
-                projectId: CROSSMINT_PROJECT_ID,
-                userId: userId,
-                chain: chain
-            }
-        };
-
-        const response = await axios.post(
-            `${CROSSMINT_BASE_URL}/2022-06-09/wallets`,
-            walletConfig,
-            {
-                headers: {
-                    'X-API-KEY': CROSSMINT_API_KEY,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-
-        // Generate DID from wallet address based on chain
-        const didPrefix = SUPPORTED_CHAINS[chain].didPrefix;
-        const did = `${didPrefix}:${response.data.address}`;
-
-        // Store wallet and DID in database
-        const wallet = await prisma.wallet.create({
-            data: {
-                address: response.data.address,
-                type: response.data.type || 'evm-mpc-wallet',
-                chain: chain, // Use the specified chain
-                provider: 'crossmint',
-                user_id: userId,
-                did: did,
-                created_at: new Date(),
-                updated_at: new Date()
-            }
-        });
-
-        // If this is an issuer, update their record with the DID
-        if (isIssuer) {
-            const issuer = await prisma.issuer.update({
-                where: { user_id: userId },
-                data: {
-                    did: did,
-                    did_created_at: new Date(),
-                    updated_at: new Date()
-                }
-            });
-
-            // Update wallet with issuer_id
-            await prisma.wallet.update({
-                where: { id: wallet.id },
-                data: { issuer_id: issuer.id }
-            });
-        }
-
-        return {
-            success: true,
-            data: {
-                ...response.data,
-                did,
-                wallet,
-                chain
-            }
-        };
-    } catch (error) {
-        console.error('Error creating Crossmint wallet:', error.response?.data || error.message);
-        return {
-            success: false,
-            error: error.response?.data?.message || error.message
-        };
-    }
+/**
+ * Generate JWT for Crossmint API
+ * @param {string} userId - User ID
+ * @returns {Promise<string>} JWT token
+ */
+async function generateCrossmintJWT(userId) {
+  try {
+    // Private key should be stored securely in env vars
+    const privateKeyPEM = process.env.JWT_PRIVATE_KEY || crypto.randomBytes(32).toString('base64');
+    
+    // Create and sign the JWT
+    const jwt = await new SignJWT()
+      .setProtectedHeader({ alg: 'RS256' })
+      .setIssuer(CROSSMINT_PROJECT_ID)
+      .setSubject(userId.toString())
+      .setAudience('crossmint.com')
+      .setExpirationTime('10m')
+      .sign(Buffer.from(privateKeyPEM));
+    
+    return jwt;
+  } catch (error) {
+    console.error('Error generating Crossmint JWT:', error);
+    throw error;
+  }
 }
 
-async function getWalletBalance(walletAddress) {
-    try {
-        const url = new URL(`${CROSSMINT_BASE_URL}/v1-alpha2/wallets/${walletAddress}/balances`);
-        url.search = new URLSearchParams({
-            tokens: 'eth,usdc',
-            chains: 'ethereum-sepolia,polygon-amoy'
-        }).toString();
-
-        const response = await axios.get(url.toString(), {
-            headers: {
-                'X-API-KEY': CROSSMINT_API_KEY,
-                'Content-Type': 'application/json'
-            }
-        });
-
-        // Get wallet with DID from database
-        const wallet = await prisma.wallet.findFirst({
-            where: { address: walletAddress }
-        });
-
-        return {
-            success: true,
-            data: {
-                ...response.data,
-                did: wallet?.did,
-                chain: wallet?.chain
-            }
-        };
-    } catch (error) {
-        console.error('Error fetching wallet balance:', error.response?.data || error.message);
-        return {
-            success: false,
-            error: error.response?.data?.message || error.message
-        };
+/**
+ * Create a wallet via Crossmint API
+ * @param {number} userId - User ID
+ * @param {boolean} isIssuer - Whether user is an issuer
+ * @param {string} chain - Blockchain chain
+ * @returns {Promise<object>} Created wallet data
+ */
+async function createWallet(userId, isIssuer, chain = 'ethereum-sepolia') {
+  try {
+    // Verify chain is supported
+    if (!SUPPORTED_CHAINS[chain]) {
+      return {
+        success: false,
+        error: `Unsupported chain: ${chain}. Supported chains are: ${Object.keys(SUPPORTED_CHAINS).join(', ')}`
+      };
     }
+    
+    // Get chain configuration
+    const chainConfig = SUPPORTED_CHAINS[chain];
+    
+    // Prepare request body
+    const walletData = {
+      type: chainConfig.type,
+      config: {
+        adminSigner: chainConfig.adminSigner
+      }
+    };
+    
+    // Link wallet to user
+    walletData.linkedUser = `userId:${userId}`;
+    
+    // Call Crossmint API to create wallet
+    const response = await axios.post(`${CROSSMINT_BASE_URL}/2022-06-09/wallets`, walletData, {
+      headers: {
+        "X-API-KEY": CROSSMINT_API_KEY,
+        "Content-Type": "application/json"
+      }
+    });
+    
+    console.log(`Created wallet for user ${userId} on chain ${chain}:`, response.data);
+    
+    // Store wallet in database
+    let wallet = await prisma.wallet.findFirst({
+      where: { user_id: userId, chain }
+    });
+    
+    // If wallet already exists for this chain, update it
+    if (wallet) {
+      wallet = await prisma.wallet.update({
+        where: { id: wallet.id },
+        data: {
+          address: response.data.address,
+          type: chainConfig.type,
+          updated_at: new Date()
+        }
+      });
+    } else {
+      // Create new wallet record
+      wallet = await prisma.wallet.create({
+        data: {
+          user_id: userId,
+          issuer_id: isIssuer ? await getIssuerId(userId) : null,
+          address: response.data.address,
+          type: chainConfig.type,
+          chain,
+          is_active: true,
+          created_at: new Date(),
+          updated_at: new Date()
+        }
+      });
+    }
+    
+    // If this is an issuer, generate a DID
+    let did = null;
+    if (isIssuer) {
+      // Get or create DID
+      did = await generateDIDForIssuer(userId);
+    }
+    
+    return {
+      success: true,
+      data: {
+        wallet,
+        chain,
+        did
+      }
+    };
+  } catch (error) {
+    console.error('Error creating Crossmint wallet:', error.response?.data || error.message);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Get issuer ID for user
+ * @param {number} userId - User ID
+ * @returns {Promise<number|null>} Issuer ID or null
+ * @private
+ */
+async function getIssuerId(userId) {
+  const issuer = await prisma.issuer.findFirst({
+    where: { user_id: userId }
+  });
+  
+  return issuer?.id || null;
+}
+
+/**
+ * Get wallet balance from Crossmint
+ * @param {string} walletAddress - Wallet address
+ * @param {string[]} tokens - Tokens to check balance for
+ * @param {string[]} chains - Chains to check balance on
+ * @returns {Promise<object>} Balance data
+ */
+async function getWalletBalance(walletAddress, tokens = ["eth", "usdc"], chains = ["ethereum-sepolia", "base-sepolia"]) {
+  try {
+    const url = new URL(`${CROSSMINT_BASE_URL}/v1-alpha2/wallets/${walletAddress}/balances`);
+    url.search = new URLSearchParams({
+      tokens: tokens.join(','),
+      chains: chains.join(',')
+    }).toString();
+    
+    const response = await axios.get(url.toString(), {
+      headers: {
+        "X-API-KEY": CROSSMINT_API_KEY
+      }
+    });
+    
+    return response.data;
+  } catch (error) {
+    console.error('Error getting wallet balance:', error);
+    throw error;
+  }
+}
+
+/**
+ * Verify Crossmint webhook signature
+ * @param {string} signature - Webhook signature
+ * @param {string} rawBody - Raw request body
+ * @returns {boolean} Whether signature is valid
+ */
+function verifyWebhookSignature(signature, rawBody) {
+  const webhookSecret = process.env.CROSSMINT_WEBHOOK_SECRET || 'whsec_wnSCMaGf3uCDYpdXciDBZB30IEMCWt8E';
+  
+  try {
+    const hmac = crypto.createHmac('sha256', webhookSecret)
+      .update(rawBody)
+      .digest('hex');
+    
+    return signature === `sha256=${hmac}`;
+  } catch (error) {
+    console.error('Error verifying webhook signature:', error);
+    return false;
+  }
 }
 
 module.exports = {
-    createWallet,
-    getWalletBalance,
-    CROSSMINT_PROJECT_ID,
-    WEBHOOK_URL,
-    SUPPORTED_CHAINS
+  SUPPORTED_CHAINS,
+  createWallet,
+  getWalletBalance,
+  generateCrossmintJWT,
+  verifyWebhookSignature
 }; 

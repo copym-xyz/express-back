@@ -7,7 +7,7 @@ const passport = require('passport');
 const { PrismaClient } = require('@prisma/client');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const extractUserId = require('./utils/extractUserId');
+const { extractUserId } = require('./utils/sumsubUtils');
 const axios = require('axios');
 const { generateDIDForIssuer } = require('./utils/didUtils');
 const crossmintWebhooks = require('./routes/crossmint-webhooks');
@@ -19,9 +19,22 @@ const prisma = new PrismaClient();
 // CORS configuration
 app.use(cors({
   origin: function(origin, callback) {
-    const allowedOrigins = ['http://localhost:3000', 'https://aef0-103-175-137-128.ngrok-free.app', 'https://api.sumsub.com'];
+    const allowedOrigins = [
+      'http://localhost:3000', 
+      'http://localhost:3000/issuer/dashboard',
+      'https://aef0-103-175-137-128.ngrok-free.app', 
+      'https://api.sumsub.com',
+      'https://test-api.sumsub.com',
+      'https://backendsandbox.sumsub.com',
+      'https://inlaksumsub.com', 
+      'https://www.inlaksumsub.com',
+      'https://www.sumsub.com',
+      'https://sumsub.com',
+      'https://in.sumsub.com',
+      'https://in.sumsub.com/websdk/p/sbx_pNyYazONzGEltUqF'
+    ];
     // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+    if (!origin || allowedOrigins.some(allowed => origin.startsWith(allowed))) {
       callback(null, true);
     } else {
       console.log('CORS blocked for origin:', origin);
@@ -30,11 +43,12 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Payload-Digest']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Payload-Digest', 'X-App-Token', 'X-App-Access-Sig', 'X-App-Access-Ts'],
+  exposedHeaders: ['Content-Disposition']
 }));
 
 // Import routes
-const sumsubWebhooksRouter = require('./routes/sumsub-webhooks');
+const sumsubWebhooksRouter = require('./routes/sumsub/sumsub-webhooks.routes');
 
 // Sumsub webhooks must be handled before body parser
 app.use('/webhooks/sumsub', sumsubWebhooksRouter);
@@ -100,21 +114,15 @@ app.use(async (req, res, next) => {
 });
 
 // Routes
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/issuer', require('./routes/issuer'));
-app.use('/api/admin', require('./routes/admin'));
-app.use('/api/investor', require('./routes/investor'));
-app.use('/api/wallet', require('./routes/wallet'));
-app.use('/api/sumsub', require('./routes/sumsub'));
-app.use('/api/issuer-vc', require('./routes/issuer-vc'));
+app.use('/api', require('./routes/api'));
 
 // Add the webhooks route
-const webhooksRoutes = require('./routes/webhooks');
+const webhooksRoutes = require('./routes/webhooks/index');
 app.use('/webhooks', webhooksRoutes);
 
 // Webhook routes
 app.use('/webhooks/sumsub', sumsubWebhooksRouter);
-app.use('/webhooks/crossmint', require('./routes/crossmint-webhooks'));
+app.use('/webhooks/crossmint', require('./routes/crossmint/crossmint-webhooks.routes'));
 
 // Test endpoint that always works
 app.get('/api/test', (req, res) => {

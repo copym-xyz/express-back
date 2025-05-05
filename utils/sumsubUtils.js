@@ -519,6 +519,64 @@ const savePersonalInfo = async (applicantId, personalInfo) => {
   }
 };
 
+/**
+ * Extracts user ID from external user ID string provided by Sumsub
+ * @param {string} externalUserId - External user ID from Sumsub
+ * @returns {number|null} - Extracted user ID or null if not found
+ */
+function extractUserId(externalUserId) {
+  if (!externalUserId) return null;
+  
+  // Check for userId- prefix (common format)
+  if (externalUserId.startsWith('userId-')) {
+    const id = externalUserId.split('userId-')[1];
+    return parseInt(id, 10) || null;
+  }
+  
+  // Check for user- prefix (alternative format)
+  if (externalUserId.startsWith('user-')) {
+    const id = externalUserId.split('user-')[1];
+    return parseInt(id, 10) || null;
+  }
+  
+  // Check for issuer- prefix (when related to issuers)
+  if (externalUserId.startsWith('issuer-')) {
+    const id = externalUserId.split('issuer-')[1];
+    return parseInt(id, 10) || null;
+  }
+  
+  // Check if the string is already a number
+  if (/^\d+$/.test(externalUserId)) {
+    return parseInt(externalUserId, 10);
+  }
+  
+  return null;
+}
+
+/**
+ * Formats a SumSub verification status into a standardized format
+ * @param {string} status - SumSub verification status
+ * @returns {string} - Standardized status
+ */
+function formatVerificationStatus(status) {
+  if (!status) return 'UNKNOWN';
+  
+  switch(status.toLowerCase()) {
+    case 'approved':
+    case 'completed':
+      return 'APPROVED';
+    case 'pending':
+    case 'init':
+    case 'processing':
+      return 'PENDING';
+    case 'rejected':
+    case 'failed':
+      return 'REJECTED';
+    default:
+      return status.toUpperCase();
+  }
+}
+
 module.exports = {
   SUMSUB_APP_TOKEN,
   SUMSUB_SECRET_KEY,
@@ -530,5 +588,7 @@ module.exports = {
   KYC_DOCS_BASE_DIR,
   fetchApplicantData,
   extractPersonalInfo,
-  savePersonalInfo
+  savePersonalInfo,
+  extractUserId,
+  formatVerificationStatus
 };

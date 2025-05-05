@@ -99,16 +99,17 @@ model didwallet {
 }
 
 model investor {
-  id                   Int       @id @default(autoincrement())
-  user_id              Int       @unique(map: "Investor_user_id_key")
+  id                   Int          @id @default(autoincrement())
+  user_id              Int          @unique(map: "Investor_user_id_key")
   investor_type        String
   accreditation_status String
   accreditation_date   DateTime?
   kyc_documents        Json?
   aml_documents        Json?
-  kyc_verified         Boolean   @default(false)
-  aml_verified         Boolean   @default(false)
-  users                users     @relation(fields: [user_id], references: [id], map: "Investor_user_id_fkey")
+  kyc_verified         Boolean      @default(false)
+  aml_verified         Boolean      @default(false)
+  users                users        @relation(fields: [user_id], references: [id], map: "Investor_user_id_fkey")
+  investments          investment[]
 }
 
 model issuer {
@@ -136,6 +137,7 @@ model issuer {
   users                       users                @relation(fields: [user_id], references: [id])
   issuer_credentials          issuer_credentials[]
   wallet                      wallet?
+  offerings                   offering[]
 }
 
 model kyc_address_info {
@@ -397,11 +399,11 @@ model issuer_credentials {
   metadata         String?   @db.Text
   created_at       DateTime  @default(now())
   updated_at       DateTime  @updatedAt
-  token_id         String?   // NFT token ID
-  contract_address String?   // NFT contract address
-  chain            String?   // Blockchain chain
-  transaction_hash String?   // Transaction hash for the NFT minting
-  image_url        String?   // URL to the NFT image
+  token_id         String? // NFT token ID
+  contract_address String? // NFT contract address
+  chain            String? // Blockchain chain
+  transaction_hash String? // Transaction hash for the NFT minting
+  image_url        String? // URL to the NFT image
   issuer           issuer    @relation(fields: [issuer_id], references: [id])
 
   @@index([issuer_id])
@@ -431,4 +433,70 @@ model issuer_credential_type {
   @@index([user_id])
   @@index([applicant_id])
   @@index([did])
+}
+
+model offering {
+  id                 Int      @id @default(autoincrement())
+  name               String
+  description        String   @db.Text
+  symbol             String
+  minimum_investment Float
+  target_raise       Float
+  price              Float
+  start_date         DateTime
+  end_date           DateTime
+  terms              String?  @db.Text
+  is_active          Boolean  @default(true)
+  issuer_id          String
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+
+  // Relations
+  issuer           issuer            @relation(fields: [issuer_id], references: [id])
+  asset            asset[]
+  offeringDocument offeringDocument?
+  investment       investment[]
+
+  @@index([issuer_id])
+}
+
+model asset {
+  id               Int     @id @default(autoincrement())
+  type             String
+  contract_address String?
+  token_id         String?
+  chain            String?
+  offering_id      Int
+
+  // Relations
+  offering offering @relation(fields: [offering_id], references: [id])
+
+  @@index([offering_id])
+}
+
+model offeringDocument {
+  id          Int    @id @default(autoincrement())
+  name        String
+  type        String
+  url         String
+  offering_id Int    @unique
+
+  // Relations
+  offering offering @relation(fields: [offering_id], references: [id])
+}
+
+model investment {
+  id          Int      @id @default(autoincrement())
+  investor_id Int
+  offering_id Int
+  amount      Float
+  status      String
+  created_at  DateTime @default(now())
+
+  // Relations
+  investor investor @relation(fields: [investor_id], references: [id])
+  offering offering @relation(fields: [offering_id], references: [id])
+
+  @@index([investor_id])
+  @@index([offering_id])
 }
